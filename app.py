@@ -8,7 +8,7 @@ API_BASE = st.secrets.get("API_BASE", os.environ.get("API_BASE", "http://localho
 REQUEST_TIMEOUT = 600
 ACCEPTED_TYPES = ["txt", "pdf", "csv"]
 
-st.set_page_config(page_title="DocChat", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Querify", layout="wide", initial_sidebar_state="expanded")
 
 
 _GLOBAL_CSS = """
