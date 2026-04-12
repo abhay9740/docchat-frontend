@@ -425,20 +425,46 @@ def _render_sidebar():
         col_proc, col_clear = st.columns(2, gap="small")
 
         process_clicked = False
-        if uploaded_file is None or (st.session_state.doc_ingested and not settings_changed):
-            col_proc.button("⚙ Process", disabled=True, use_container_width=True)
-        elif settings_changed:
+        if settings_changed:
             process_clicked = col_proc.button("🔄 Reprocess", use_container_width=True)
-        else:
+        elif uploaded_file is not None and not st.session_state.doc_ingested:
             process_clicked = col_proc.button("⚙ Process", use_container_width=True)
+        else:
+            col_proc.button("⚙ Process", disabled=True, use_container_width=True)
 
         if col_clear.button("🗑 Clear", use_container_width=True):
             _clear_session()
             st.rerun()
 
-        if process_clicked and uploaded_file is not None:
-            with st.spinner("Processing..."):
-                _process_and_ingest(uploaded_file, chunk_size, chunk_overlap)
+        if process_clicked:
+            if uploaded_file is not None:
+                with st.spinner("Processing..."):
+                    _process_and_ingest(uploaded_file, chunk_size, chunk_overlap)
+            elif st.session_state.get("doc_text"):
+                with st.spinner("Reprocessing with new settings..."):
+                    try:
+                        resp = requests.post(
+                            f"{API_BASE}/ingest_text",
+                            json={
+                                "text": st.session_state.doc_text,
+                                "chunk_size": chunk_size,
+                                "chunk_overlap": chunk_overlap,
+                            },
+                            timeout=REQUEST_TIMEOUT,
+                        )
+                        if resp.status_code == 200:
+                            st.session_state.num_chunks = resp.json().get("num_chunks", "?")
+                            st.session_state.last_chunk_size = chunk_size
+                            st.session_state.last_chunk_overlap = chunk_overlap
+                            if st.session_state.get("doc_meta"):
+                                st.session_state.doc_meta["chunk_size"] = chunk_size
+                                st.session_state.doc_meta["chunk_overlap"] = chunk_overlap
+                            _poll_ingest_progress()
+                            st.rerun()
+                        else:
+                            st.error(resp.json().get("detail", "Reprocessing failed."))
+                    except requests.ConnectionError:
+                        st.error("Cannot connect to backend.")
 
     return chunk_size, chunk_overlap, top_k
 
