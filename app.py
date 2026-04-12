@@ -18,12 +18,25 @@ _GLOBAL_CSS = """
 [data-testid="stStatusWidget"], [data-testid="stDecoration"] {
     display: none !important;
 }
-header[data-testid="stHeader"] { background: transparent !important; }
+header[data-testid="stHeader"] {
+    background: transparent !important;
+    pointer-events: none;
+}
 
-/* ── Keep sidebar collapse button visible ── */
-[data-testid="collapsedControl"] {
+/* ── Keep sidebar collapse/expand button visible ── */
+[data-testid="collapsedControl"],
+[data-testid="stSidebarCollapsedControl"],
+button[kind="headerNoPadding"],
+header[data-testid="stHeader"] button {
     display: flex !important;
     visibility: visible !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    z-index: 999999 !important;
+    color: #374151 !important;
+    background: #fafafa !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 8px !important;
 }
 
 /* ── Force light theme ── */
