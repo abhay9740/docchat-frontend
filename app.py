@@ -13,18 +13,30 @@ st.set_page_config(page_title="DocChat", layout="wide", initial_sidebar_state="e
 
 _GLOBAL_CSS = """
 <style>
+/* ── Hide Streamlit chrome ── */
 #MainMenu, footer, [data-testid="stToolbar"],
 [data-testid="stStatusWidget"], [data-testid="stDecoration"] {
     display: none !important;
 }
 header[data-testid="stHeader"] { background: transparent !important; }
 
+/* ── Force light theme ── */
+:root, [data-testid="stAppViewContainer"], .stApp {
+    color-scheme: light !important;
+}
 .stApp {
-    background-color: #f7f7f8;
+    background-color: #f7f7f8 !important;
+    color: #1f1f1f !important;
     background-image:
         linear-gradient(rgba(0,0,0,0.04) 1px, transparent 1px),
         linear-gradient(90deg, rgba(0,0,0,0.04) 1px, transparent 1px);
     background-size: 40px 40px;
+}
+
+/* ── Global text color reset ── */
+.stApp, .stApp p, .stApp span, .stApp li, .stApp label,
+.stApp div, .stApp h1, .stApp h2, .stApp h3, .stApp h4 {
+    color: #1f1f1f !important;
 }
 
 .block-container {
@@ -34,12 +46,56 @@ header[data-testid="stHeader"] { background: transparent !important; }
     padding-bottom: 2rem;
 }
 
+/* ── Sidebar ── */
 [data-testid="stSidebar"] {
-    background: #fafafa;
+    background: #fafafa !important;
     border-right: 1px solid #e5e7eb;
 }
 [data-testid="stSidebar"] h1 { font-size: 1.1rem; }
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] div {
+    color: #374151 !important;
+}
 
+/* ── Chat messages ── */
+[data-testid="stChatMessage"] {
+    background: #ffffff !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 12px !important;
+    padding: 1rem !important;
+    margin-bottom: 0.5rem;
+}
+[data-testid="stChatMessage"] p,
+[data-testid="stChatMessage"] span,
+[data-testid="stChatMessage"] li,
+[data-testid="stChatMessage"] code,
+[data-testid="stChatMessage"] div {
+    color: #1f1f1f !important;
+}
+[data-testid="stChatMessage"] pre {
+    background: #f3f4f6 !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 8px !important;
+}
+[data-testid="stChatMessage"] pre code {
+    color: #374151 !important;
+}
+
+/* ── Expander (retrieved chunks) ── */
+[data-testid="stExpander"] {
+    background: #f9fafb !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 8px !important;
+}
+[data-testid="stExpander"] p,
+[data-testid="stExpander"] span,
+[data-testid="stExpander"] summary {
+    color: #374151 !important;
+}
+
+/* ── Right info panel ── */
 .right-panel {
     position: fixed; right: 0; top: 0;
     width: 300px; height: 100vh;
@@ -51,13 +107,13 @@ header[data-testid="stHeader"] { background: transparent !important; }
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 .right-panel h3 {
-    font-size: 1rem; font-weight: 600; color: #374151;
+    font-size: 1rem; font-weight: 600; color: #374151 !important;
     margin: 0 0 0.8rem 0;
     padding-bottom: 0.5rem;
     border-bottom: 1px solid #e5e7eb;
 }
 .right-panel .section-title {
-    font-size: 0.8rem; font-weight: 600; color: #9ca3af;
+    font-size: 0.8rem; font-weight: 600; color: #9ca3af !important;
     text-transform: uppercase; letter-spacing: 0.05em;
     margin: 1rem 0 0.4rem 0;
 }
@@ -66,14 +122,15 @@ header[data-testid="stHeader"] { background: transparent !important; }
     padding: 5px 0; font-size: 0.84rem;
     border-bottom: 1px solid #f3f4f6;
 }
-.right-panel .info-row .label { color: #6b7280; }
-.right-panel .info-row .value { font-weight: 600; color: #1f2937; }
+.right-panel .info-row .label { color: #6b7280 !important; }
+.right-panel .info-row .value { font-weight: 600; color: #1f2937 !important; }
 .right-panel .rec-pill {
-    display: inline-block; background: #ecfdf5; color: #059669;
+    display: inline-block; background: #ecfdf5; color: #059669 !important;
     font-size: 0.75rem; font-weight: 600;
     padding: 2px 8px; border-radius: 10px;
 }
 
+/* ── Landing page ── */
 .logo-cluster {
     display: flex; justify-content: center; align-items: center;
     margin-top: 6vh; margin-bottom: 20px;
@@ -87,11 +144,11 @@ header[data-testid="stHeader"] { background: transparent !important; }
     position: absolute;
 }
 .logo-teal {
-    background: linear-gradient(135deg, #2d9b83, #40c9a2); color: white;
+    background: linear-gradient(135deg, #2d9b83, #40c9a2); color: white !important;
     transform: rotate(-6deg); left: calc(50% - 40px); z-index: 2;
 }
 .logo-blue {
-    background: linear-gradient(135deg, #4285f4, #669df6); color: white;
+    background: linear-gradient(135deg, #4285f4, #669df6); color: white !important;
     transform: rotate(6deg); left: calc(50% - 10px); top: -8px; z-index: 3;
 }
 .logo-doc {
@@ -109,17 +166,24 @@ header[data-testid="stHeader"] { background: transparent !important; }
 }
 
 .greeting {
-    text-align: center; font-size: 34px; font-weight: 500; color: #1f1f1f;
+    text-align: center; font-size: 34px; font-weight: 500; color: #1f1f1f !important;
     font-family: 'Georgia', 'Times New Roman', serif;
     margin-bottom: 30px; line-height: 1.3;
 }
 
+/* ── Chat input ── */
 [data-testid="stChatInput"] {
     border-radius: 16px !important;
     box-shadow: 0 2px 12px rgba(0,0,0,0.06) !important;
+    background: #ffffff !important;
 }
-[data-testid="stChatInput"] textarea { font-size: 16px !important; color: #444 !important; }
+[data-testid="stChatInput"] textarea {
+    font-size: 16px !important;
+    color: #1f1f1f !important;
+    background: #ffffff !important;
+}
 
+/* ── File uploader ── */
 .drop-zone-wrapper [data-testid="stFileUploader"] {
     border: 2px dashed #cfe3ff !important; border-radius: 12px !important;
     padding: 16px 20px !important; background: #f0f6ff !important;
@@ -135,16 +199,35 @@ header[data-testid="stHeader"] { background: transparent !important; }
 .drop-zone-wrapper label { display: none !important; }
 
 .drop-hint {
-    text-align: center; font-size: 15px; color: #3b82f6;
+    text-align: center; font-size: 15px; color: #3b82f6 !important;
     font-weight: 500; margin-top: -8px; margin-bottom: 4px;
     pointer-events: none;
 }
 
+/* ── File badge ── */
 .file-badge {
-    text-align: center; color: #6b7280; font-size: 0.85rem;
+    text-align: center; color: #6b7280 !important; font-size: 0.85rem;
     padding: 0.5rem 0 0.8rem 0;
 }
-.file-badge b { color: #374151; }
+.file-badge b { color: #374151 !important; }
+
+/* ── Buttons ── */
+.stButton > button {
+    color: #374151 !important;
+    background: #ffffff !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 8px !important;
+}
+.stButton > button:hover {
+    background: #f3f4f6 !important;
+    border-color: #9ca3af !important;
+}
+
+/* ── Slider labels ── */
+[data-testid="stSlider"] label,
+[data-testid="stSlider"] div {
+    color: #374151 !important;
+}
 </style>
 """
 
