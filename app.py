@@ -4,7 +4,7 @@ import time
 import os
 from datetime import datetime
 
-API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
+API_BASE = st.secrets.get("API_BASE", os.environ.get("API_BASE", "http://localhost:8000"))
 REQUEST_TIMEOUT = 600
 ACCEPTED_TYPES = ["txt", "pdf", "csv"]
 
