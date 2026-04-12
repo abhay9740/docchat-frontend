@@ -23,35 +23,18 @@ header[data-testid="stHeader"] {
     pointer-events: none;
 }
 
-/* ── Hide sidebar collapse button — sidebar is always needed ── */
+/* ── Sidebar always visible, no collapse button ── */
 [data-testid="stSidebarCollapseButton"],
+[data-testid="collapsedControl"],
 [data-testid="stSidebarNavCollapseIcon"],
 button[data-testid="baseButton-headerNoPadding"] {
     display: none !important;
 }
-
-/* ── Ensure sidebar expand button is always visible if sidebar collapses ── */
-[data-testid="collapsedControl"] {
-    display: flex !important;
+[data-testid="stSidebar"] {
+    transform: none !important;
     visibility: visible !important;
-    opacity: 1 !important;
-    pointer-events: auto !important;
-    position: fixed !important;
-    top: 0.75rem !important;
-    left: 0.75rem !important;
-    z-index: 9999999 !important;
-    background: #4285f4 !important;
-    color: #ffffff !important;
-    border-radius: 50% !important;
-    width: 2.2rem !important;
-    height: 2.2rem !important;
-    border: none !important;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
-    align-items: center !important;
-    justify-content: center !important;
-}
-[data-testid="collapsedControl"] svg {
-    fill: #ffffff !important;
+    width: 22rem !important;
+    min-width: 22rem !important;
 }
 
 /* ── Force light theme ── */
