@@ -23,27 +23,35 @@ header[data-testid="stHeader"] {
     pointer-events: none;
 }
 
-/* ── Keep sidebar collapse/expand button visible ── */
-[data-testid="collapsedControl"],
-[data-testid="stSidebarCollapsedControl"],
-button[kind="headerNoPadding"],
-header[data-testid="stHeader"] button {
+/* ── Hide sidebar collapse button — sidebar is always needed ── */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebarNavCollapseIcon"],
+button[data-testid="baseButton-headerNoPadding"] {
+    display: none !important;
+}
+
+/* ── Ensure sidebar expand button is always visible if sidebar collapses ── */
+[data-testid="collapsedControl"] {
     display: flex !important;
     visibility: visible !important;
     opacity: 1 !important;
     pointer-events: auto !important;
-    z-index: 999999 !important;
-    color: #1f1f1f !important;
-    background: #e2e8f0 !important;
-    border: 1px solid #94a3b8 !important;
-    border-radius: 8px !important;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.15) !important;
+    position: fixed !important;
+    top: 0.75rem !important;
+    left: 0.75rem !important;
+    z-index: 9999999 !important;
+    background: #4285f4 !important;
+    color: #ffffff !important;
+    border-radius: 50% !important;
+    width: 2.2rem !important;
+    height: 2.2rem !important;
+    border: none !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
+    align-items: center !important;
+    justify-content: center !important;
 }
-[data-testid="collapsedControl"] svg,
-[data-testid="stSidebarCollapsedControl"] svg,
-header[data-testid="stHeader"] button svg {
-    fill: #1f1f1f !important;
-    color: #1f1f1f !important;
+[data-testid="collapsedControl"] svg {
+    fill: #ffffff !important;
 }
 
 /* ── Force light theme ── */
