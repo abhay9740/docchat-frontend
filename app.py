@@ -248,9 +248,13 @@ for key, default in _DEFAULTS.items():
         st.session_state[key] = default
 
 
+_WIDGET_KEYS = {"sl_chunk_size", "sl_chunk_overlap"}
+
+
 def _clear_session():
     for key, default in _DEFAULTS.items():
-        st.session_state[key] = default
+        if key not in _WIDGET_KEYS:
+            st.session_state[key] = default
     for key in ("doc_meta", "num_chunks", "doc_text",
                 "recommended_chunk_size", "recommended_chunk_overlap",
                 "recommended_top_k", "last_chunk_size", "last_chunk_overlap"):
