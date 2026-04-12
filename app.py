@@ -20,6 +20,12 @@ _GLOBAL_CSS = """
 }
 header[data-testid="stHeader"] { background: transparent !important; }
 
+/* ── Keep sidebar collapse button visible ── */
+[data-testid="collapsedControl"] {
+    display: flex !important;
+    visibility: visible !important;
+}
+
 /* ── Force light theme ── */
 :root, [data-testid="stAppViewContainer"], .stApp {
     color-scheme: light !important;
