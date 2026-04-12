@@ -33,10 +33,17 @@ header[data-testid="stHeader"] button {
     opacity: 1 !important;
     pointer-events: auto !important;
     z-index: 999999 !important;
-    color: #374151 !important;
-    background: #fafafa !important;
-    border: 1px solid #e5e7eb !important;
+    color: #1f1f1f !important;
+    background: #e2e8f0 !important;
+    border: 1px solid #94a3b8 !important;
     border-radius: 8px !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.15) !important;
+}
+[data-testid="collapsedControl"] svg,
+[data-testid="stSidebarCollapsedControl"] svg,
+header[data-testid="stHeader"] button svg {
+    fill: #1f1f1f !important;
+    color: #1f1f1f !important;
 }
 
 /* ── Force light theme ── */
