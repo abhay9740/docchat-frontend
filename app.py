@@ -8,7 +8,7 @@ API_BASE = st.secrets.get("API_BASE", os.environ.get("API_BASE", "http://localho
 REQUEST_TIMEOUT = 600
 ACCEPTED_TYPES = ["txt", "pdf", "csv"]
 
-st.set_page_config(page_title="Querify", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Querify", layout="wide", initial_sidebar_state="auto")
 
 
 _GLOBAL_CSS = """
@@ -23,18 +23,26 @@ header[data-testid="stHeader"] {
     pointer-events: none;
 }
 
-/* ── Sidebar always visible, no collapse button ── */
-[data-testid="stSidebarCollapseButton"],
-[data-testid="collapsedControl"],
-[data-testid="stSidebarNavCollapseIcon"],
-button[data-testid="baseButton-headerNoPadding"] {
-    display: none !important;
+/* ── Sidebar: pinned open on desktop, collapsible on mobile ── */
+@media (min-width: 769px) {
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="collapsedControl"],
+    [data-testid="stSidebarNavCollapseIcon"],
+    button[data-testid="baseButton-headerNoPadding"] {
+        display: none !important;
+    }
+    [data-testid="stSidebar"] {
+        transform: none !important;
+        visibility: visible !important;
+        width: 22rem !important;
+        min-width: 22rem !important;
+    }
 }
-[data-testid="stSidebar"] {
-    transform: none !important;
-    visibility: visible !important;
-    width: 22rem !important;
-    min-width: 22rem !important;
+@media (max-width: 768px) {
+    [data-testid="stSidebar"] {
+        width: 85vw !important;
+        min-width: unset !important;
+    }
 }
 
 /* ── Force light theme ── */
@@ -61,6 +69,14 @@ button[data-testid="baseButton-headerNoPadding"] {
     margin: 0 auto;
     padding-top: 2rem;
     padding-bottom: 2rem;
+}
+@media (max-width: 768px) {
+    .block-container {
+        padding-top: 0.75rem !important;
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+        padding-bottom: 5rem !important;
+    }
 }
 
 /* ── Sidebar ── */
@@ -122,6 +138,21 @@ button[data-testid="baseButton-headerNoPadding"] {
     z-index: 999; overflow-y: auto;
     box-shadow: -2px 0 12px rgba(0,0,0,0.05);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+@media (max-width: 768px) {
+    .right-panel {
+        position: relative !important;
+        right: auto !important;
+        top: auto !important;
+        width: 100% !important;
+        height: auto !important;
+        box-shadow: none !important;
+        border-left: none !important;
+        border-top: 1px solid #e5e7eb;
+        border-radius: 12px !important;
+        margin-bottom: 1rem;
+        padding: 1rem !important;
+    }
 }
 .right-panel h3 {
     font-size: 1rem; font-weight: 600; color: #374151 !important;
@@ -187,6 +218,20 @@ button[data-testid="baseButton-headerNoPadding"] {
     font-family: 'Georgia', 'Times New Roman', serif;
     margin-bottom: 30px; line-height: 1.3;
 }
+@media (max-width: 768px) {
+    .greeting {
+        font-size: 22px !important;
+        margin-bottom: 16px !important;
+    }
+    .logo-cluster {
+        margin-top: 2vh !important;
+        margin-bottom: 12px !important;
+    }
+    .logo-box { width: 48px !important; height: 48px !important; font-size: 22px !important; }
+    .logo-teal { left: calc(50% - 32px) !important; }
+    .logo-blue { left: calc(50% - 8px) !important; }
+    .logo-doc  { left: calc(50% - 48px) !important; }
+}
 
 /* ── Chat input ── */
 [data-testid="stChatInput"] {
@@ -195,9 +240,17 @@ button[data-testid="baseButton-headerNoPadding"] {
     background: #ffffff !important;
 }
 [data-testid="stChatInput"] textarea {
-    font-size: 16px !important;
+    font-size: 16px !important; /* 16 px prevents iOS auto-zoom */
     color: #1f1f1f !important;
     background: #ffffff !important;
+}
+@media (max-width: 768px) {
+    [data-testid="stChatInput"] {
+        border-radius: 12px !important;
+    }
+    [data-testid="stChatMessage"] {
+        padding: 0.65rem 0.75rem !important;
+    }
 }
 
 /* ── File uploader ── */
