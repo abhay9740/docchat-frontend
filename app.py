@@ -660,6 +660,41 @@ def _render_sidebar():
                     except requests.ConnectionError:
                         st.error("Cannot connect to backend.")
 
+        # ── Debug: Browse chunks ─────────────────────────────────────────────
+        if st.session_state.doc_ingested:
+            st.divider()
+            with st.expander("🔍 Browse chunks (debug)", expanded=False):
+                search_q = st.text_input(
+                    "Filter chunks", placeholder="keyword…", key="debug_chunk_search",
+                )
+                page_size = 20
+                total_chunks = st.session_state.get("num_chunks", 0)
+                if isinstance(total_chunks, int) and total_chunks > 0:
+                    max_page = max(0, (total_chunks - 1) // page_size)
+                else:
+                    max_page = 0
+                page_num = st.number_input(
+                    "Page", min_value=0, max_value=max_page, value=0, step=1,
+                    key="debug_chunk_page",
+                )
+                if st.button("Load", key="debug_chunk_load"):
+                    try:
+                        resp = requests.get(
+                            f"{API_BASE}/chunks",
+                            params={"offset": page_num * page_size, "limit": page_size, "search": search_q},
+                            timeout=10,
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            st.caption(f"Showing {len(data['chunks'])} of {data['total']} matching chunks")
+                            for ch in data["chunks"]:
+                                st.markdown(f"**Chunk {ch['index']}**")
+                                st.code(ch["text"], language=None)
+                        else:
+                            st.error(resp.json().get("detail", "Failed to load chunks."))
+                    except requests.ConnectionError:
+                        st.error("Cannot connect to backend.")
+
     return chunk_size, chunk_overlap, top_k, answer_mode
 
 
