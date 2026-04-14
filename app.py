@@ -738,13 +738,17 @@ def _render_landing():
             lc1, lc2 = st.columns(2)
             landing_chunk_size = lc1.slider(
                 "Chunk size", min_value=50, max_value=1000, step=10,
-                key="sl_chunk_size",
+                value=st.session_state.sl_chunk_size,
+                key="landing_sl_chunk_size",
             )
             landing_chunk_overlap = lc2.slider(
                 "Chunk overlap", min_value=0, max_value=200, step=5,
-                key="sl_chunk_overlap",
+                value=st.session_state.sl_chunk_overlap,
+                key="landing_sl_chunk_overlap",
             )
             if st.button("⚙ Process document", use_container_width=True):
+                st.session_state.sl_chunk_size = landing_chunk_size
+                st.session_state.sl_chunk_overlap = landing_chunk_overlap
                 with st.spinner("Processing file..."):
                     _process_and_ingest(
                         landing_file,
