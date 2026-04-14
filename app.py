@@ -527,6 +527,7 @@ def _render_citation_chips(chunks: list[dict], key_prefix: str, owner_key: str):
                 "score": chunk["score"],
                 "text": chunk["text"],
             }
+            st.rerun()
 
 
 def _render_selected_chunk_preview():
