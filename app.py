@@ -791,9 +791,6 @@ def _render_chat(top_k: int, answer_mode: str):
     if st.session_state.show_right_panel:
         _render_right_panel()
 
-    # Keep citation preview anchored in one place to avoid layout jumps
-    _render_selected_chunk_preview()
-
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
@@ -857,6 +854,10 @@ def _render_chat(top_k: int, answer_mode: str):
                 "model_used": stream_state.get("model"),
             }
         )
+
+    # Keep citation preview anchored in one place to avoid layout jumps.
+    # Render at the bottom so it does not displace conversation headers.
+    _render_selected_chunk_preview()
 
 
 _, _, top_k, answer_mode = _render_sidebar()
