@@ -734,12 +734,23 @@ def _render_landing():
         st.markdown('</div>', unsafe_allow_html=True)
 
         if landing_file is not None:
-            with st.spinner("Processing file..."):
-                _process_and_ingest(
-                    landing_file,
-                    st.session_state.sl_chunk_size,
-                    st.session_state.sl_chunk_overlap,
-                )
+            st.markdown(f"**📄 {landing_file.name}** — configure chunking settings before processing:")
+            lc1, lc2 = st.columns(2)
+            landing_chunk_size = lc1.slider(
+                "Chunk size", min_value=50, max_value=1000, step=10,
+                key="sl_chunk_size",
+            )
+            landing_chunk_overlap = lc2.slider(
+                "Chunk overlap", min_value=0, max_value=200, step=5,
+                key="sl_chunk_overlap",
+            )
+            if st.button("⚙ Process document", use_container_width=True):
+                with st.spinner("Processing file..."):
+                    _process_and_ingest(
+                        landing_file,
+                        landing_chunk_size,
+                        landing_chunk_overlap,
+                    )
 
     if st.chat_input("How can I help you today?"):
         st.info("Please upload a document first, then ask your question.")
