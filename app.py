@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import json
 import time
 import os
 from datetime import datetime
@@ -627,6 +628,54 @@ def _render_landing():
         st.info("Please upload a document first, then ask your question.")
 
 
+def _stream_query(prompt: str, top_k: int, stream_state: dict):
+    """Generator for st.write_stream. Populates stream_state['chunks'] and stream_state['model'].
+    Sets stream_state['need_reingest'] = True if the backend signals no document / still embedding.
+    """
+    payload = {
+        "query": prompt,
+        "history": st.session_state.messages[:-1],
+        "top_k": top_k,
+    }
+    try:
+        with requests.post(
+            f"{API_BASE}/query/stream",
+            json=payload,
+            stream=True,
+            timeout=REQUEST_TIMEOUT,
+        ) as resp:
+            if resp.status_code in (400, 409):
+                stream_state["need_reingest"] = True
+                stream_state["reingest_detail"] = resp.json().get("detail", "")
+                return
+            if resp.status_code != 200:
+                try:
+                    detail = resp.json().get("detail", "Unknown error")
+                except Exception:
+                    detail = resp.text
+                yield detail
+                return
+            for raw in resp.iter_lines():
+                if not raw:
+                    continue
+                line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    event = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
+                t = event.get("type")
+                if t == "chunks":
+                    stream_state["chunks"] = event["data"]
+                elif t == "token":
+                    yield event["data"]
+                elif t == "done":
+                    stream_state["model"] = event.get("model_used")
+    except requests.ConnectionError:
+        yield "Error: lost connection to the backend."
+
+
 def _render_chat(top_k: int):
     meta = st.session_state.doc_meta
     top_l, top_r = st.columns([9, 1])
@@ -655,22 +704,41 @@ def _render_chat(top_k: int):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                result = _query_with_auto_reingest(prompt, top_k)
+            stream_state = {"chunks": [], "model": None, "need_reingest": False, "reingest_detail": ""}
 
-            if result is None:
-                st.stop()
+            for attempt in range(2):
+                stream_state["need_reingest"] = False
 
-            if result.get("chunks"):
+                answer = st.write_stream(_stream_query(prompt, top_k, stream_state))
+
+                if not stream_state["need_reingest"]:
+                    break
+
+                # Handle 409 (still embedding) or 400 "No document" by re-ingesting then retrying
+                detail = stream_state["reingest_detail"]
+                if "No document" in detail and st.session_state.get("doc_text"):
+                    try:
+                        requests.post(
+                            f"{API_BASE}/ingest_text",
+                            json={
+                                "text": st.session_state.doc_text,
+                                "chunk_size": st.session_state.get("last_chunk_size", 180),
+                                "chunk_overlap": st.session_state.get("last_chunk_overlap", 40),
+                            },
+                            timeout=REQUEST_TIMEOUT,
+                        )
+                    except requests.ConnectionError:
+                        st.error("Cannot reconnect to backend.")
+                        st.stop()
+                _poll_ingest_progress()
+
+            if stream_state["chunks"]:
                 with st.expander("Retrieved chunks", expanded=False):
-                    for chunk in result["chunks"]:
+                    for chunk in stream_state["chunks"]:
                         st.markdown(
                             f"**Chunk {chunk['index']}** (score: {chunk['score']:.4f})\n\n"
                             f"```\n{chunk['text']}\n```"
                         )
-
-            answer = result.get("answer", "No answer returned.")
-            st.markdown(answer)
 
         st.session_state.messages.append({"role": "assistant", "content": answer})
 
