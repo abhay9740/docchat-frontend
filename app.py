@@ -344,6 +344,7 @@ _DEFAULTS = {
     "sl_chunk_overlap": 40,
     "answer_mode": "balanced",
     "focus_chunk": None,
+    "focus_owner": None,
     "show_right_panel": False,
 }
 
@@ -364,6 +365,7 @@ def _clear_session():
                 "recommended_top_k", "last_chunk_size", "last_chunk_overlap"):
         st.session_state.pop(key, None)
     st.session_state.focus_chunk = None
+    st.session_state.focus_owner = None
 
 
 def _upload_file(file_obj, chunk_size: int, chunk_overlap: int) -> dict | None:
@@ -511,7 +513,7 @@ def _render_confidence_badge(confidence_label: str | None, top_score: float | No
     )
 
 
-def _render_citation_chips(chunks: list[dict], key_prefix: str):
+def _render_citation_chips(chunks: list[dict], key_prefix: str, owner_key: str):
     if not chunks:
         return
     st.markdown('<div class="citations-row"><b>Citations</b></div>', unsafe_allow_html=True)
@@ -520,6 +522,25 @@ def _render_citation_chips(chunks: list[dict], key_prefix: str):
         idx = chunk["index"]
         if cols[i].button(f"Chunk {idx}", key=f"{key_prefix}_chip_{idx}", use_container_width=True):
             st.session_state.focus_chunk = idx
+            st.session_state.focus_owner = owner_key
+
+
+def _render_selected_chunk(chunks: list[dict], owner_key: str):
+    if not chunks:
+        return
+    if st.session_state.get("focus_owner") != owner_key:
+        return
+
+    focus_idx = st.session_state.get("focus_chunk")
+    selected = next((c for c in chunks if c["index"] == focus_idx), None)
+    if selected is None:
+        return
+
+    with st.expander("Retrieved chunk", expanded=True):
+        st.markdown(
+            f"**Chunk {selected['index']}** (score: {selected['score']:.4f})\n\n"
+            f"```\n{selected['text']}\n```"
+        )
 
 
 def _render_sidebar():
@@ -779,8 +800,10 @@ def _render_chat(top_k: int, answer_mode: str):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if msg["role"] == "assistant":
+                owner_key = f"hist_{i}"
                 _render_confidence_badge(msg.get("confidence_label"), msg.get("top_score"))
-                _render_citation_chips(msg.get("chunks", []), key_prefix=f"hist_{i}")
+                _render_citation_chips(msg.get("chunks", []), key_prefix=owner_key, owner_key=owner_key)
+                _render_selected_chunk(msg.get("chunks", []), owner_key=owner_key)
 
     if prompt := st.chat_input("How can I help you today?"):
         st.session_state.messages.append({"role": "user", "content": prompt})
@@ -788,6 +811,7 @@ def _render_chat(top_k: int, answer_mode: str):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
+            pending_owner = f"hist_{len(st.session_state.messages)}"
             stream_state = {
                 "chunks": [],
                 "model": None,
@@ -824,18 +848,8 @@ def _render_chat(top_k: int, answer_mode: str):
                 _poll_ingest_progress()
 
             _render_confidence_badge(stream_state.get("confidence_label"), stream_state.get("top_score"))
-            _render_citation_chips(stream_state["chunks"], key_prefix="live")
-
-            if stream_state["chunks"]:
-                expand_chunks = st.session_state.focus_chunk is not None
-                with st.expander("Retrieved chunks", expanded=expand_chunks):
-                    for chunk in stream_state["chunks"]:
-                        is_focus = st.session_state.focus_chunk == chunk["index"]
-                        prefix = "👉 " if is_focus else ""
-                        st.markdown(
-                            f"{prefix}**Chunk {chunk['index']}** (score: {chunk['score']:.4f})\n\n"
-                            f"```\n{chunk['text']}\n```"
-                        )
+            _render_citation_chips(stream_state["chunks"], key_prefix="live", owner_key=pending_owner)
+            _render_selected_chunk(stream_state["chunks"], owner_key=pending_owner)
 
         st.session_state.messages.append(
             {
