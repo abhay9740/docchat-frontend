@@ -531,11 +531,35 @@ def _render_selected_chunk_preview():
     selected = st.session_state.get("selected_chunk")
     if not selected:
         return
-    st.markdown("**Selected citation**")
-    st.markdown(
-        f"**Chunk {selected['index']}** (score: {selected['score']:.4f})\n\n"
-        f"```\n{selected['text']}\n```"
-    )
+
+    target_idx = selected["index"]
+    score = selected["score"]
+
+    # Fetch expanded context (target ± 1 neighbour) from backend.
+    try:
+        resp = requests.get(
+            f"{API_BASE}/chunk_context",
+            params={"index": target_idx, "window": 1},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()["chunks"]
+        else:
+            data = [{"index": target_idx, "text": selected["text"], "is_target": True}]
+    except Exception:
+        data = [{"index": target_idx, "text": selected["text"], "is_target": True}]
+
+    with st.expander(
+        f"Citation — Chunk {target_idx} (score: {score:.4f})  ·  showing passage context",
+        expanded=True,
+    ):
+        for part in data:
+            if part["is_target"]:
+                st.markdown(f"**▶ Chunk {part['index']}** *(cited)*")
+                st.code(part["text"], language=None)
+            else:
+                st.markdown(f"*Chunk {part['index']} (adjacent)*")
+                st.markdown(f"```\n{part['text']}\n```")
 
 
 def _render_sidebar():
