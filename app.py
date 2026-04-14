@@ -342,6 +342,8 @@ _DEFAULTS = {
     "current_file": None,
     "sl_chunk_size": 180,
     "sl_chunk_overlap": 40,
+    "landing_sl_chunk_size": 180,
+    "landing_sl_chunk_overlap": 40,
     "answer_mode": "balanced",
     "selected_chunk": None,
     "show_right_panel": False,
