@@ -299,6 +299,37 @@ header[data-testid="stHeader"] {
 [data-testid="stSlider"] div {
     color: #374151 !important;
 }
+
+/* ── Confidence + citations ── */
+.confidence-row {
+    margin: 0.2rem 0 0.7rem 0;
+}
+.confidence-badge {
+    display: inline-block;
+    font-size: 0.78rem;
+    font-weight: 700;
+    border-radius: 999px;
+    padding: 0.18rem 0.6rem;
+    border: 1px solid transparent;
+}
+.conf-high {
+    color: #065f46 !important;
+    background: #d1fae5;
+    border-color: #6ee7b7;
+}
+.conf-medium {
+    color: #92400e !important;
+    background: #fef3c7;
+    border-color: #fcd34d;
+}
+.conf-low {
+    color: #991b1b !important;
+    background: #fee2e2;
+    border-color: #fca5a5;
+}
+.citations-row {
+    margin: 0.25rem 0 0.6rem 0;
+}
 </style>
 """
 
@@ -311,6 +342,8 @@ _DEFAULTS = {
     "current_file": None,
     "sl_chunk_size": 180,
     "sl_chunk_overlap": 40,
+    "answer_mode": "balanced",
+    "focus_chunk": None,
     "show_right_panel": False,
 }
 
@@ -330,6 +363,7 @@ def _clear_session():
                 "recommended_chunk_size", "recommended_chunk_overlap",
                 "recommended_top_k", "last_chunk_size", "last_chunk_overlap"):
         st.session_state.pop(key, None)
+    st.session_state.focus_chunk = None
 
 
 def _upload_file(file_obj, chunk_size: int, chunk_overlap: int) -> dict | None:
@@ -454,6 +488,40 @@ def _time_greeting() -> str:
     return "Good evening"
 
 
+def _confidence_css_class(confidence_label: str | None) -> str:
+    if confidence_label == "High":
+        return "conf-high"
+    if confidence_label == "Medium":
+        return "conf-medium"
+    return "conf-low"
+
+
+def _render_confidence_badge(confidence_label: str | None, top_score: float | None):
+    if not confidence_label:
+        return
+    score_text = f" ({top_score:.4f})" if isinstance(top_score, (int, float)) else ""
+    css_class = _confidence_css_class(confidence_label)
+    st.markdown(
+        (
+            '<div class="confidence-row">'
+            f'<span class="confidence-badge {css_class}">Confidence: {confidence_label}{score_text}</span>'
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _render_citation_chips(chunks: list[dict], key_prefix: str):
+    if not chunks:
+        return
+    st.markdown('<div class="citations-row"><b>Citations</b></div>', unsafe_allow_html=True)
+    cols = st.columns(min(len(chunks), 5))
+    for i, chunk in enumerate(chunks[:5]):
+        idx = chunk["index"]
+        if cols[i].button(f"Chunk {idx}", key=f"{key_prefix}_chip_{idx}", use_container_width=True):
+            st.session_state.focus_chunk = idx
+
+
 def _render_sidebar():
     with st.sidebar:
         st.markdown("### ⚙️ Chunking Settings")
@@ -474,6 +542,15 @@ def _render_sidebar():
             f"Top-K chunks (rec: {rec_tk})" if rec_tk else "Top-K chunks",
             min_value=1, max_value=20, value=3, step=1,
         )
+
+        answer_mode = st.radio(
+            "Answer mode",
+            options=["balanced", "strict_grounded"],
+            format_func=lambda x: "Balanced" if x == "balanced" else "Strict grounded",
+            index=0 if st.session_state.answer_mode == "balanced" else 1,
+            help="Strict grounded returns only document-grounded answers and refuses low-confidence queries.",
+        )
+        st.session_state.answer_mode = answer_mode
 
         st.divider()
         st.markdown("### 📂 Upload")
@@ -541,7 +618,7 @@ def _render_sidebar():
                     except requests.ConnectionError:
                         st.error("Cannot connect to backend.")
 
-    return chunk_size, chunk_overlap, top_k
+    return chunk_size, chunk_overlap, top_k, answer_mode
 
 
 def _warn_large_file(uploaded_file, chunk_size: int, chunk_overlap: int):
@@ -628,7 +705,7 @@ def _render_landing():
         st.info("Please upload a document first, then ask your question.")
 
 
-def _stream_query(prompt: str, top_k: int, stream_state: dict):
+def _stream_query(prompt: str, top_k: int, answer_mode: str, stream_state: dict):
     """Generator for st.write_stream. Populates stream_state['chunks'] and stream_state['model'].
     Sets stream_state['need_reingest'] = True if the backend signals no document / still embedding.
     """
@@ -636,6 +713,7 @@ def _stream_query(prompt: str, top_k: int, stream_state: dict):
         "query": prompt,
         "history": st.session_state.messages[:-1],
         "top_k": top_k,
+        "answer_mode": answer_mode,
     }
     try:
         with requests.post(
@@ -666,7 +744,10 @@ def _stream_query(prompt: str, top_k: int, stream_state: dict):
                 except json.JSONDecodeError:
                     continue
                 t = event.get("type")
-                if t == "chunks":
+                if t == "meta":
+                    stream_state["confidence_label"] = event.get("confidence_label")
+                    stream_state["top_score"] = event.get("top_score")
+                elif t == "chunks":
                     stream_state["chunks"] = event["data"]
                 elif t == "token":
                     yield event["data"]
@@ -676,7 +757,7 @@ def _stream_query(prompt: str, top_k: int, stream_state: dict):
         yield "Error: lost connection to the backend."
 
 
-def _render_chat(top_k: int):
+def _render_chat(top_k: int, answer_mode: str):
     meta = st.session_state.doc_meta
     top_l, top_r = st.columns([9, 1])
     with top_l:
@@ -694,9 +775,12 @@ def _render_chat(top_k: int):
     if st.session_state.show_right_panel:
         _render_right_panel()
 
-    for msg in st.session_state.messages:
+    for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            if msg["role"] == "assistant":
+                _render_confidence_badge(msg.get("confidence_label"), msg.get("top_score"))
+                _render_citation_chips(msg.get("chunks", []), key_prefix=f"hist_{i}")
 
     if prompt := st.chat_input("How can I help you today?"):
         st.session_state.messages.append({"role": "user", "content": prompt})
@@ -704,12 +788,19 @@ def _render_chat(top_k: int):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            stream_state = {"chunks": [], "model": None, "need_reingest": False, "reingest_detail": ""}
+            stream_state = {
+                "chunks": [],
+                "model": None,
+                "need_reingest": False,
+                "reingest_detail": "",
+                "confidence_label": None,
+                "top_score": None,
+            }
 
             for attempt in range(2):
                 stream_state["need_reingest"] = False
 
-                answer = st.write_stream(_stream_query(prompt, top_k, stream_state))
+                answer = st.write_stream(_stream_query(prompt, top_k, answer_mode, stream_state))
 
                 if not stream_state["need_reingest"]:
                     break
@@ -732,20 +823,35 @@ def _render_chat(top_k: int):
                         st.stop()
                 _poll_ingest_progress()
 
+            _render_confidence_badge(stream_state.get("confidence_label"), stream_state.get("top_score"))
+            _render_citation_chips(stream_state["chunks"], key_prefix="live")
+
             if stream_state["chunks"]:
-                with st.expander("Retrieved chunks", expanded=False):
+                expand_chunks = st.session_state.focus_chunk is not None
+                with st.expander("Retrieved chunks", expanded=expand_chunks):
                     for chunk in stream_state["chunks"]:
+                        is_focus = st.session_state.focus_chunk == chunk["index"]
+                        prefix = "👉 " if is_focus else ""
                         st.markdown(
-                            f"**Chunk {chunk['index']}** (score: {chunk['score']:.4f})\n\n"
+                            f"{prefix}**Chunk {chunk['index']}** (score: {chunk['score']:.4f})\n\n"
                             f"```\n{chunk['text']}\n```"
                         )
 
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": answer,
+                "chunks": stream_state["chunks"],
+                "top_score": stream_state.get("top_score"),
+                "confidence_label": stream_state.get("confidence_label"),
+                "model_used": stream_state.get("model"),
+            }
+        )
 
 
-_, _, top_k = _render_sidebar()
+_, _, top_k, answer_mode = _render_sidebar()
 
 if st.session_state.doc_ingested:
-    _render_chat(top_k)
+    _render_chat(top_k, answer_mode)
 else:
     _render_landing()
