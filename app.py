@@ -839,6 +839,7 @@ def _render_chat(top_k: int, answer_mode: str):
                 _render_citation_chips(msg.get("chunks", []), key_prefix=owner_key, owner_key=owner_key)
 
     if prompt := st.chat_input("How can I help you today?"):
+        st.session_state.selected_chunk = None
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
