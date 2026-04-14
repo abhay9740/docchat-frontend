@@ -573,10 +573,12 @@ def _render_sidebar():
         chunk_size = st.slider(
             f"Chunk size (rec: {rec_cs})" if rec_cs else "Chunk size",
             min_value=50, max_value=1000, step=10, key="sl_chunk_size",
+            value=st.session_state.get("last_chunk_size", st.session_state.sl_chunk_size),
         )
         chunk_overlap = st.slider(
             f"Chunk overlap (rec: {rec_co})" if rec_co is not None else "Chunk overlap",
             min_value=0, max_value=200, step=5, key="sl_chunk_overlap",
+            value=st.session_state.get("last_chunk_overlap", st.session_state.sl_chunk_overlap),
         )
         top_k = st.slider(
             f"Top-K chunks (rec: {rec_tk})" if rec_tk else "Top-K chunks",
@@ -747,8 +749,6 @@ def _render_landing():
                 key="landing_sl_chunk_overlap",
             )
             if st.button("⚙ Process document", use_container_width=True):
-                st.session_state.sl_chunk_size = landing_chunk_size
-                st.session_state.sl_chunk_overlap = landing_chunk_overlap
                 with st.spinner("Processing file..."):
                     _process_and_ingest(
                         landing_file,
