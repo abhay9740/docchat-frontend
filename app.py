@@ -5,7 +5,12 @@ import time
 import os
 from datetime import datetime
 
-API_BASE = st.secrets.get("API_BASE", os.environ.get("API_BASE", "http://localhost:8000"))
+try:
+    _streamlit_api_base = st.secrets["API_BASE"]
+except Exception:
+    _streamlit_api_base = None
+
+API_BASE = _streamlit_api_base or os.environ.get("API_BASE", "http://localhost:8000")
 REQUEST_TIMEOUT = 600
 ACCEPTED_TYPES = ["txt", "pdf", "csv"]
 
