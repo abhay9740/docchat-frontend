@@ -49,7 +49,6 @@ _GLOBAL_CSS = """
 }
 header[data-testid="stHeader"] {
     background: transparent !important;
-    pointer-events: none;
 }
 
 /* ── Root background: deep dark with soft radial glow ── */
@@ -93,18 +92,30 @@ html, body, [data-testid="stAppViewContainer"], .stApp {
     border-right: 1px solid var(--border) !important;
 }
 [data-testid="stSidebar"] > div:first-child { padding-top: 1rem; }
-/* Sidebar toggle button — visible and styled */
+/* Sidebar toggle buttons — high contrast so they're always visible */
 [data-testid="stSidebarCollapseButton"],
-[data-testid="collapsedControl"] {
-    background: var(--bg-overlay) !important;
-    border: 1px solid var(--border) !important;
+[data-testid="stSidebarCollapseButton"] > button,
+[data-testid="collapsedControl"],
+[data-testid="collapsedControl"] > button,
+button[kind="headerNoPadding"] {
+    background: var(--bg-surface) !important;
+    border: 1px solid var(--accent) !important;
     border-radius: 6px !important;
-    color: var(--text-sec) !important;
+    color: var(--accent) !important;
+    opacity: 1 !important;
+    z-index: 1000 !important;
 }
 [data-testid="stSidebarCollapseButton"]:hover,
-[data-testid="collapsedControl"]:hover {
-    background: var(--bg-hover) !important;
+[data-testid="stSidebarCollapseButton"] > button:hover,
+[data-testid="collapsedControl"]:hover,
+[data-testid="collapsedControl"] > button:hover {
+    background: var(--accent-dim) !important;
     color: var(--text-pri) !important;
+}
+[data-testid="stSidebarCollapseButton"] svg,
+[data-testid="collapsedControl"] svg {
+    fill: var(--accent) !important;
+    stroke: var(--accent) !important;
 }
 [data-testid="stSidebar"] p,
 [data-testid="stSidebar"] span,
