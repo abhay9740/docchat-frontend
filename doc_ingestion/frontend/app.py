@@ -358,7 +358,7 @@ for key, default in _DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-_GRAPH_SESSION_KEYS = ("cached_graph_html", "cached_graph_caption")
+_GRAPH_SESSION_KEYS = ("cached_graph_html", "cached_graph_caption", "graph_fetch_attempted")
 
 
 _WIDGET_KEYS = {"sl_chunk_size", "sl_chunk_overlap"}
@@ -591,7 +591,7 @@ def _fetch_graph_into_session(max_nodes: int) -> None:
 
 
 def _render_knowledge_graph_section() -> None:
-    with st.expander("🕸 Knowledge Graph", expanded=False):
+    with st.expander("🕸 Knowledge Graph", expanded=True):
         c1, c2 = st.columns([3, 2])
         max_nodes = c1.slider(
             "Max nodes", min_value=20, max_value=300, value=120, step=10,
@@ -602,13 +602,20 @@ def _render_knowledge_graph_section() -> None:
             for k in _GRAPH_SESSION_KEYS:
                 st.session_state.pop(k, None)
             _fetch_graph_into_session(max_nodes)
+            st.rerun()
+
+        cached_html = st.session_state.get("cached_graph_html")
+        if not cached_html and not st.session_state.get("graph_fetch_attempted"):
+            st.session_state["graph_fetch_attempted"] = True
+            _fetch_graph_into_session(max_nodes)
+            st.rerun()
 
         cached_html = st.session_state.get("cached_graph_html")
         if cached_html:
             st.markdown(st.session_state.get("cached_graph_caption", ""))
             st.components.v1.html(cached_html, height=600, scrolling=False)
         else:
-            st.info("Click **Load / Refresh** to render the knowledge graph for the ingested document.")
+            st.info("No graph data yet — the document may still be indexing. Click **Load / Refresh** to try again.")
 
 
 def _confidence_css_class(confidence_label: str | None) -> str:
