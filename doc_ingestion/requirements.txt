@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+PyMuPDF
+streamlit
+requests
+langchain-text-splitters
+huggingface-hub
