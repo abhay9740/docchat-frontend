@@ -7,3 +7,4 @@ streamlit
 requests
 langchain-text-splitters
 huggingface-hub
+qdrant-client

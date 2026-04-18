@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from huggingface_hub import InferenceClient
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+try:
+    from qdrant_client import QdrantClient, models
+except Exception:  # pragma: no cover - optional dependency at runtime
+    QdrantClient = None
+    models = None
+
 log = logging.getLogger(__name__)
 
 FALLBACK_MODELS = [
@@ -88,6 +94,7 @@ class RAGEngine:
     def __init__(
         self,
         embed_provider: str = "graph",
+        retrieval_backend: str = "graph",
         chunk_size: int = 180,
         chunk_overlap: int = 40,
         top_k: int = 3,
@@ -97,17 +104,55 @@ class RAGEngine:
         self.chunk_overlap = chunk_overlap
         self.top_k = top_k
         self.llm_model = llm_model
-        self.embed_provider = "graph"
+        self.embed_provider = (embed_provider or "graph").lower()
+        self.retrieval_backend = (retrieval_backend or "graph").lower()
         self.chunks: list[str] = []
 
         self._ingest_progress: dict = {"state": "idle", "embedded": 0, "total": 0}
         self._graph_lock = threading.Lock()
         self._ingest_generation = 0
 
+        self._qdrant_url = os.environ.get("QDRANT_URL", "").strip()
+        self._qdrant_api_key = os.environ.get("QDRANT_API_KEY", "").strip()
+        self._qdrant_collection = os.environ.get("QDRANT_COLLECTION", "docchat_chunks").strip() or "docchat_chunks"
+        self._embedding_model = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2").strip()
+        self._qdrant_client = None
+        self._qdrant_vector_size: int | None = None
+        self._qdrant_enabled = False
+
         self._chunk_terms: dict[int, Counter[str]] = {}
         self._chunk_entities: dict[int, set[str]] = {}
         self._entity_to_chunks: dict[str, set[int]] = defaultdict(set)
         self._entity_graph: dict[str, dict[str, float]] = defaultdict(dict)
+
+        self._init_qdrant_if_configured()
+
+    def _init_qdrant_if_configured(self):
+        wants_qdrant = self.retrieval_backend in {"qdrant", "vector", "vector_db"}
+        if not wants_qdrant:
+            self.retrieval_backend = "knowledge_graph"
+            return
+
+        if QdrantClient is None or models is None:
+            log.warning("qdrant-client is not installed; falling back to knowledge_graph backend")
+            self.retrieval_backend = "knowledge_graph"
+            return
+
+        if not self._qdrant_url or not self._qdrant_api_key:
+            log.warning("QDRANT_URL/QDRANT_API_KEY missing; falling back to knowledge_graph backend")
+            self.retrieval_backend = "knowledge_graph"
+            return
+
+        try:
+            self._qdrant_client = QdrantClient(url=self._qdrant_url, api_key=self._qdrant_api_key)
+            self._qdrant_enabled = True
+            self.retrieval_backend = "qdrant"
+            log.info("Qdrant backend enabled. Collection=%s", self._qdrant_collection)
+        except Exception as e:
+            log.warning("Failed to initialize Qdrant client; falling back to knowledge_graph backend: %s", e)
+            self._qdrant_client = None
+            self._qdrant_enabled = False
+            self.retrieval_backend = "knowledge_graph"
 
     @property
     def ingest_progress(self) -> dict:
@@ -118,6 +163,37 @@ class RAGEngine:
         return bool(self.chunks) and self._ingest_progress.get("state") != "running"
 
     def vector_store_status(self) -> dict:
+        if self._qdrant_enabled and self._qdrant_client is not None:
+            exists = False
+            points_count = 0
+            try:
+                exists = self._qdrant_client.collection_exists(self._qdrant_collection)
+                if exists:
+                    info = self._qdrant_client.get_collection(self._qdrant_collection)
+                    points_count = int(getattr(info, "points_count", 0) or 0)
+            except Exception as e:
+                return {
+                    "provider": "qdrant",
+                    "is_ready": self.is_ready,
+                    "loaded_chunks": len(self.chunks),
+                    "ingest_state": self._ingest_progress.get("state", "idle"),
+                    "collection": self._qdrant_collection,
+                    "collection_exists": False,
+                    "detail": f"Qdrant status check failed: {e}",
+                }
+
+            return {
+                "provider": "qdrant",
+                "is_ready": self.is_ready,
+                "loaded_chunks": len(self.chunks),
+                "ingest_state": self._ingest_progress.get("state", "idle"),
+                "collection": self._qdrant_collection,
+                "collection_exists": exists,
+                "points_count": points_count,
+                "embedding_model": self._embedding_model,
+                "detail": "Qdrant vector index active.",
+            }
+
         node_count = len(self._entity_to_chunks)
         edge_count = sum(len(v) for v in self._entity_graph.values()) // 2
         return {
@@ -131,8 +207,18 @@ class RAGEngine:
         }
 
     def graph_store_status(self) -> dict:
-        # Graph retrieval is the active backend; keep vector endpoint as a compatibility alias.
-        return self.vector_store_status()
+        node_count = len(self._entity_to_chunks)
+        edge_count = sum(len(v) for v in self._entity_graph.values()) // 2
+        return {
+            "provider": "knowledge_graph",
+            "is_ready": self.is_ready,
+            "loaded_chunks": len(self.chunks),
+            "ingest_state": self._ingest_progress.get("state", "idle"),
+            "graph_nodes": node_count,
+            "graph_edges": edge_count,
+            "active_backend": self.retrieval_backend,
+            "detail": "Graph index status.",
+        }
 
     def ingest(self, text: str) -> int:
         self._do_split(text)
@@ -156,6 +242,11 @@ class RAGEngine:
 
     def _do_embed(self):
         gen = self._ingest_generation
+
+        if self._qdrant_enabled and self._qdrant_client is not None:
+            self._do_embed_qdrant(gen)
+            return
+
         try:
             with self._graph_lock:
                 if gen != self._ingest_generation:
@@ -203,6 +294,76 @@ class RAGEngine:
                 )
         except Exception as e:
             log.exception("Graph index build failed")
+            self._ingest_progress = {"state": "error", "embedded": 0, "total": 0, "error": str(e)}
+
+    def _embed_text(self, text: str) -> list[float]:
+        token = os.environ.get("HF_TOKEN")
+        if not token:
+            raise RuntimeError("HF_TOKEN not set for embedding generation")
+
+        client = InferenceClient(api_key=token)
+        vec = client.feature_extraction(text, model=self._embedding_model)
+
+        if hasattr(vec, "tolist"):
+            vec = vec.tolist()
+
+        # Some providers may return nested vectors; flatten one level if needed.
+        if vec and isinstance(vec[0], list):
+            vec = vec[0]
+
+        return [float(x) for x in vec]
+
+    def _ensure_qdrant_collection(self, vector_size: int):
+        if self._qdrant_client is None:
+            raise RuntimeError("Qdrant client is not initialized")
+
+        if self._qdrant_client.collection_exists(self._qdrant_collection):
+            return
+
+        self._qdrant_client.create_collection(
+            collection_name=self._qdrant_collection,
+            vectors_config=models.VectorParams(size=vector_size, distance=models.Distance.COSINE),
+        )
+        log.info("Created Qdrant collection '%s' (size=%d)", self._qdrant_collection, vector_size)
+
+    def _do_embed_qdrant(self, gen: int):
+        try:
+            total = len(self.chunks)
+            if total == 0:
+                self._ingest_progress = {"state": "done", "embedded": 0, "total": 0}
+                return
+
+            self._ingest_progress = {"state": "running", "embedded": 0, "total": total}
+
+            points = []
+            for idx, chunk in enumerate(self.chunks):
+                if gen != self._ingest_generation:
+                    return
+
+                vector = self._embed_text(chunk)
+                if self._qdrant_vector_size is None:
+                    self._qdrant_vector_size = len(vector)
+                    self._ensure_qdrant_collection(self._qdrant_vector_size)
+
+                if len(vector) != self._qdrant_vector_size:
+                    raise RuntimeError(
+                        f"Embedding size mismatch: expected {self._qdrant_vector_size}, got {len(vector)}"
+                    )
+
+                points.append(
+                    models.PointStruct(
+                        id=(gen * 1_000_000) + idx,
+                        vector=vector,
+                        payload={"text": chunk, "chunk_index": idx, "generation": gen},
+                    )
+                )
+                self._ingest_progress["embedded"] = idx + 1
+
+            self._qdrant_client.upsert(collection_name=self._qdrant_collection, points=points)
+            self._ingest_progress["state"] = "done"
+            log.info("Qdrant index updated: %d chunks to collection '%s'", total, self._qdrant_collection)
+        except Exception as e:
+            log.exception("Qdrant index build failed")
             self._ingest_progress = {"state": "error", "embedded": 0, "total": 0, "error": str(e)}
 
     def _clear_graph(self):
@@ -303,6 +464,9 @@ class RAGEngine:
         if not self.chunks:
             return []
 
+        if self._qdrant_enabled and self._qdrant_client is not None:
+            return self._retrieve_qdrant(query)
+
         query_terms = self._extract_terms(query)
         query_entities = self._extract_entities(query)
         expanded = self._expand_query_entities(query_entities)
@@ -341,6 +505,36 @@ class RAGEngine:
             filtered = [candidates[0]]
 
         return filtered[: self.top_k]
+
+    def _retrieve_qdrant(self, query: str) -> list[RetrievedChunk]:
+        try:
+            query_vector = self._embed_text(query)
+            hits = self._qdrant_client.search(
+                collection_name=self._qdrant_collection,
+                query_vector=query_vector,
+                limit=self.top_k,
+                query_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="generation",
+                            match=models.MatchValue(value=self._ingest_generation),
+                        )
+                    ]
+                ),
+                with_payload=True,
+            )
+            out: list[RetrievedChunk] = []
+            for hit in hits:
+                payload = hit.payload or {}
+                text = payload.get("text")
+                idx = payload.get("chunk_index")
+                if text is None or idx is None:
+                    continue
+                out.append(RetrievedChunk(index=int(idx), score=float(hit.score), text=str(text)))
+            return out
+        except Exception as e:
+            log.warning("Qdrant retrieval failed; returning no results: %s", e)
+            return []
 
     def _confidence_from_retrieved(self, retrieved: list[RetrievedChunk]) -> tuple[float, str]:
         top_score = float(retrieved[0].score) if retrieved else 0.0

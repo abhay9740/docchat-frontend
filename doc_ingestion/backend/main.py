@@ -25,7 +25,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-rag_engine = RAGEngine(embed_provider=os.environ.get("EMBED_PROVIDER", "gemini"))
+rag_engine = RAGEngine(
+    embed_provider=os.environ.get("EMBED_PROVIDER", "graph"),
+    retrieval_backend=os.environ.get("RETRIEVAL_BACKEND", "graph"),
+)
 
 
 class ChatMessage(BaseModel):
@@ -136,7 +139,7 @@ async def ingest_status():
 async def config():
     return {
         "embed_provider": rag_engine.embed_provider,
-        "retrieval_backend": "knowledge_graph",
+        "retrieval_backend": rag_engine.retrieval_backend,
     }
 
 
