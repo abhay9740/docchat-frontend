@@ -1,26 +1,29 @@
-import logging
-import os
+from __future__ import annotations
+
+import json
 import re
 import threading
-from collections import Counter, defaultdict
 from dataclasses import dataclass
 
+import structlog
 from huggingface_hub import InferenceClient
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-try:
-    from qdrant_client import QdrantClient, models
-except Exception:  # pragma: no cover - optional dependency at runtime
-    QdrantClient = None
-    models = None
+from .config import (
+    BACKEND_GRAPH,
+    BACKEND_QDRANT,
+    FALLBACK_LLM_MODELS,
+    STATE_DONE,
+    STATE_ERROR,
+    STATE_IDLE,
+    STATE_RUNNING,
+    Config,
+)
+from .embedding_client import EmbeddingClient
+from .graph_index import GraphIndex, extract_entities, extract_terms
+from .qdrant_store import QdrantStore
 
-log = logging.getLogger(__name__)
-
-FALLBACK_MODELS = [
-    "Qwen/Qwen2.5-72B-Instruct",
-    "meta-llama/Llama-3.3-70B-Instruct",
-    "mistralai/Mistral-Small-24B-Instruct-2501",
-]
+log = structlog.get_logger(__name__)
 
 SYSTEM_PROMPT = """\
 You are a Graph-RAG reasoning engine.
@@ -73,15 +76,6 @@ STRICT RULES:
 IF: No relationship path exists | Only one-hop shortcut found | Information is missing
 """
 
-STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "he", "in", "is", "it",
-    "its", "of", "on", "that", "the", "to", "was", "were", "will", "with", "this", "these", "those",
-    "or", "if", "then", "than", "into", "can", "could", "should", "would", "about", "over", "under",
-    "after", "before", "between", "during", "also", "such", "their", "there", "them", "they", "you",
-    "your", "we", "our", "i", "me", "my", "mine", "his", "her", "hers", "what", "which", "who",
-    "whom", "when", "where", "why", "how", "do", "does", "did", "done", "not", "no", "yes",
-}
-
 
 @dataclass
 class RetrievedChunk:
@@ -91,68 +85,91 @@ class RetrievedChunk:
 
 
 class RAGEngine:
+    """
+    Orchestrates chunking, graph indexing, vector storage, and LLM answering.
+
+    Modes
+    -----
+    knowledge_graph  Pure in-memory graph. No external dependencies.
+    qdrant           Qdrant vector search + graph re-scoring (hybrid).
+                     Falls back to knowledge_graph if Qdrant is unreachable.
+
+    Public API is fully backward-compatible with the original single-class design.
+    """
+
     def __init__(
         self,
-        embed_provider: str = "graph",
+        embed_provider: str = "hf",
         retrieval_backend: str = "graph",
         chunk_size: int = 180,
         chunk_overlap: int = 40,
         top_k: int = 3,
-        llm_model: str = "Qwen/Qwen2.5-72B-Instruct",
-    ):
+        llm_model: str | None = None,
+    ) -> None:
+        self._cfg = Config()
+
+        # Mutable runtime params
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.top_k = top_k
-        self.llm_model = llm_model
-        self.embed_provider = (embed_provider or "graph").lower()
-        self.retrieval_backend = (retrieval_backend or "graph").lower()
+        self.llm_model = llm_model or self._cfg.llm_model
+
+        # Resolved for external callers / API responses
+        self.embed_provider: str = self._cfg.embed_provider
+        self.retrieval_backend: str = BACKEND_GRAPH
+
         self.chunks: list[str] = []
+        self._ingest_progress: dict = {"state": STATE_IDLE, "embedded": 0, "total": 0}
+        self._ingest_generation: int = 0
+        self._gen_lock = threading.Lock()
 
-        self._ingest_progress: dict = {"state": "idle", "embedded": 0, "total": 0}
-        self._graph_lock = threading.Lock()
-        self._ingest_generation = 0
+        self._graph = GraphIndex(
+            hop_limit=self._cfg.graph_hop_limit,
+            per_node_limit=self._cfg.graph_per_node_limit,
+        )
+        self._embedder: EmbeddingClient | None = None
+        self._qdrant: QdrantStore | None = None
 
-        self._qdrant_url = os.environ.get("QDRANT_URL", "").strip()
-        self._qdrant_api_key = os.environ.get("QDRANT_API_KEY", "").strip()
-        self._qdrant_collection = os.environ.get("QDRANT_COLLECTION", "docchat_chunks").strip() or "docchat_chunks"
-        self._embedding_model = os.environ.get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2").strip()
-        self._qdrant_client = None
-        self._qdrant_vector_size: int | None = None
-        self._qdrant_enabled = False
+        self._init_backends()
+        log.info("rag_engine.started", backend=self.retrieval_backend)
 
-        self._chunk_terms: dict[int, Counter[str]] = {}
-        self._chunk_entities: dict[int, set[str]] = {}
-        self._entity_to_chunks: dict[str, set[int]] = defaultdict(set)
-        self._entity_graph: dict[str, dict[str, float]] = defaultdict(dict)
+    # ── Backend initialisation ─────────────────────────────────────────────────
 
-        self._init_qdrant_if_configured()
-
-    def _init_qdrant_if_configured(self):
-        wants_qdrant = self.retrieval_backend in {"qdrant", "vector", "vector_db"}
-        if not wants_qdrant:
-            self.retrieval_backend = "knowledge_graph"
+    def _init_backends(self) -> None:
+        if not self._cfg.wants_qdrant:
             return
 
-        if QdrantClient is None or models is None:
-            log.warning("qdrant-client is not installed; falling back to knowledge_graph backend")
-            self.retrieval_backend = "knowledge_graph"
-            return
-
-        if not self._qdrant_url or not self._qdrant_api_key:
-            log.warning("QDRANT_URL/QDRANT_API_KEY missing; falling back to knowledge_graph backend")
-            self.retrieval_backend = "knowledge_graph"
+        if not self._cfg.hf_token:
+            log.warning("qdrant.skipped", reason="HF_TOKEN missing")
             return
 
         try:
-            self._qdrant_client = QdrantClient(url=self._qdrant_url, api_key=self._qdrant_api_key)
-            self._qdrant_enabled = True
-            self.retrieval_backend = "qdrant"
-            log.info("Qdrant backend enabled. Collection=%s", self._qdrant_collection)
-        except Exception as e:
-            log.warning("Failed to initialize Qdrant client; falling back to knowledge_graph backend: %s", e)
-            self._qdrant_client = None
-            self._qdrant_enabled = False
-            self.retrieval_backend = "knowledge_graph"
+            self._embedder = EmbeddingClient(
+                model=self._cfg.embedding_model,
+                hf_token=self._cfg.hf_token,
+                batch_size=self._cfg.embedding_batch_size,
+            )
+        except Exception as exc:
+            log.error("embedding_client.init_failed", error=str(exc))
+            return
+
+        if not self._cfg.qdrant_configured:
+            log.warning("qdrant.skipped", reason="QDRANT_URL or QDRANT_API_KEY missing")
+            return
+
+        try:
+            self._qdrant = QdrantStore(
+                url=self._cfg.qdrant_url,
+                api_key=self._cfg.qdrant_api_key,
+                collection=self._cfg.qdrant_collection,
+            )
+            self.retrieval_backend = BACKEND_QDRANT
+            log.info("qdrant.enabled", collection=self._cfg.qdrant_collection)
+        except Exception as exc:
+            log.error("qdrant.init_failed", error=str(exc))
+            self._embedder = None
+
+    # ── Properties ────────────────────────────────────────────────────────────
 
     @property
     def ingest_progress(self) -> dict:
@@ -160,381 +177,188 @@ class RAGEngine:
 
     @property
     def is_ready(self) -> bool:
-        return bool(self.chunks) and self._ingest_progress.get("state") != "running"
+        return bool(self.chunks) and self._ingest_progress.get("state") != STATE_RUNNING
+
+    # ── Status ────────────────────────────────────────────────────────────────
 
     def vector_store_status(self) -> dict:
-        if self._qdrant_enabled and self._qdrant_client is not None:
-            exists = False
-            points_count = 0
-            try:
-                exists = self._qdrant_client.collection_exists(self._qdrant_collection)
-                if exists:
-                    info = self._qdrant_client.get_collection(self._qdrant_collection)
-                    points_count = int(getattr(info, "points_count", 0) or 0)
-            except Exception as e:
-                return {
-                    "provider": "qdrant",
-                    "is_ready": self.is_ready,
-                    "loaded_chunks": len(self.chunks),
-                    "ingest_state": self._ingest_progress.get("state", "idle"),
-                    "collection": self._qdrant_collection,
-                    "collection_exists": False,
-                    "detail": f"Qdrant status check failed: {e}",
-                }
-
-            return {
-                "provider": "qdrant",
-                "is_ready": self.is_ready,
-                "loaded_chunks": len(self.chunks),
-                "ingest_state": self._ingest_progress.get("state", "idle"),
-                "collection": self._qdrant_collection,
-                "collection_exists": exists,
-                "points_count": points_count,
-                "embedding_model": self._embedding_model,
-                "detail": "Qdrant vector index active.",
-            }
-
-        node_count = len(self._entity_to_chunks)
-        edge_count = sum(len(v) for v in self._entity_graph.values()) // 2
-        return {
-            "provider": "knowledge_graph",
+        base = {
             "is_ready": self.is_ready,
             "loaded_chunks": len(self.chunks),
-            "ingest_state": self._ingest_progress.get("state", "idle"),
-            "graph_nodes": node_count,
-            "graph_edges": edge_count,
-            "detail": "GraphRAG index active. Retrieval is entity and relation based, not vector similarity.",
+            "ingest_state": self._ingest_progress.get("state", STATE_IDLE),
+        }
+        if self._qdrant is not None:
+            return {**base, **self._qdrant.status(self._ingest_generation)}
+        gs = self._graph.status()
+        return {
+            **base,
+            "provider": "knowledge_graph",
+            "graph_nodes": gs["graph_nodes"],
+            "graph_edges": gs["graph_edges"],
+            "detail": "GraphRAG index active. Retrieval is entity and relation based.",
         }
 
     def graph_store_status(self) -> dict:
-        node_count = len(self._entity_to_chunks)
-        edge_count = sum(len(v) for v in self._entity_graph.values()) // 2
+        gs = self._graph.status()
         return {
             "provider": "knowledge_graph",
             "is_ready": self.is_ready,
             "loaded_chunks": len(self.chunks),
-            "ingest_state": self._ingest_progress.get("state", "idle"),
-            "graph_nodes": node_count,
-            "graph_edges": edge_count,
+            "ingest_state": self._ingest_progress.get("state", STATE_IDLE),
+            "graph_nodes": gs["graph_nodes"],
+            "graph_edges": gs["graph_edges"],
             "active_backend": self.retrieval_backend,
             "detail": "Graph index status.",
         }
 
-    def ingest(self, text: str) -> int:
-        self._do_split(text)
-        self._do_embed()
-        return len(self.chunks)
+    def health(self) -> dict:
+        qdrant_ok: bool | None = self._qdrant.ping() if self._qdrant else None
+        return {
+            "status": "degraded" if qdrant_ok is False else "ok",
+            "ingest_state": self._ingest_progress.get("state", STATE_IDLE),
+            "retrieval_backend": self.retrieval_backend,
+            "qdrant_reachable": qdrant_ok,
+        }
+
+    # ── Ingest ────────────────────────────────────────────────────────────────
 
     def start_ingest(self, text: str) -> int:
-        self._do_split(text)
-        return len(self.chunks)
-
-    def _do_split(self, text: str):
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
         )
         self.chunks = splitter.split_text(text)
-        self._ingest_generation += 1
+        with self._gen_lock:
+            self._ingest_generation += 1
         total = len(self.chunks)
-        self._ingest_progress = {"state": "running", "embedded": 0, "total": total}
-        log.info("Chunked into %d pieces (size=%d). Building graph index...", total, self.chunk_size)
+        self._ingest_progress = {"state": STATE_RUNNING, "embedded": 0, "total": total}
+        return total
 
-    def _do_embed(self):
+    def ingest(self, text: str) -> int:
+        n = self.start_ingest(text)
+        self._do_embed()
+        return n
+
+    def _do_embed(self) -> None:
+        if self._qdrant is not None and self._embedder is not None:
+            self._do_embed_qdrant()
+        else:
+            self._do_embed_graph()
+
+    def _do_embed_graph(self) -> None:
         gen = self._ingest_generation
-
-        if self._qdrant_enabled and self._qdrant_client is not None:
-            self._do_embed_qdrant(gen)
+        chunks = list(self.chunks)
+        total = len(chunks)
+        if total == 0:
+            self._graph.clear()
+            self._ingest_progress = {"state": STATE_DONE, "embedded": 0, "total": 0}
             return
-
         try:
-            with self._graph_lock:
-                if gen != self._ingest_generation:
-                    return
+            self._graph.build(chunks)
+            # Only update progress if this generation hasn't been superseded
+            if gen == self._ingest_generation:
+                self._ingest_progress = {"state": STATE_DONE, "embedded": total, "total": total}
+        except Exception as exc:
+            log.error("graph.build_failed", error=str(exc))
+            self._ingest_progress = {
+                "state": STATE_ERROR, "embedded": 0, "total": total, "error": str(exc)
+            }
 
-                total = len(self.chunks)
-                if total == 0:
-                    self._clear_graph()
-                    self._ingest_progress = {"state": "done", "embedded": 0, "total": 0}
-                    return
-
-                self._clear_graph()
-
-                for idx, chunk in enumerate(self.chunks):
-                    if gen != self._ingest_generation:
-                        return
-
-                    terms = self._extract_terms(chunk)
-                    entities = self._extract_entities(chunk)
-                    if not entities:
-                        entities = set(terms[:5])
-
-                    self._chunk_terms[idx] = Counter(terms)
-                    self._chunk_entities[idx] = entities
-
-                    for ent in entities:
-                        self._entity_to_chunks[ent].add(idx)
-
-                    ent_list = sorted(entities)
-                    for i in range(len(ent_list)):
-                        left = ent_list[i]
-                        for j in range(i + 1, len(ent_list)):
-                            right = ent_list[j]
-                            w = 1.0 / max(len(ent_list), 1)
-                            self._add_undirected_edge(left, right, w)
-
-                    self._ingest_progress["embedded"] = idx + 1
-
-                self._ingest_progress["state"] = "done"
-                log.info(
-                    "Graph index built: %d chunks, %d nodes, %d edges",
-                    len(self.chunks),
-                    len(self._entity_to_chunks),
-                    sum(len(v) for v in self._entity_graph.values()) // 2,
-                )
-        except Exception as e:
-            log.exception("Graph index build failed")
-            self._ingest_progress = {"state": "error", "embedded": 0, "total": 0, "error": str(e)}
-
-    def _embed_text(self, text: str) -> list[float]:
-        token = os.environ.get("HF_TOKEN")
-        if not token:
-            raise RuntimeError("HF_TOKEN not set for embedding generation")
-
-        client = InferenceClient(api_key=token)
-        vec = client.feature_extraction(text, model=self._embedding_model)
-
-        if hasattr(vec, "tolist"):
-            vec = vec.tolist()
-
-        # Some providers may return nested vectors; flatten one level if needed.
-        if vec and isinstance(vec[0], list):
-            vec = vec[0]
-
-        return [float(x) for x in vec]
-
-    def _ensure_qdrant_collection(self, vector_size: int):
-        if self._qdrant_client is None:
-            raise RuntimeError("Qdrant client is not initialized")
-
-        if self._qdrant_client.collection_exists(self._qdrant_collection):
+    def _do_embed_qdrant(self) -> None:
+        gen = self._ingest_generation
+        chunks = list(self.chunks)
+        total = len(chunks)
+        if total == 0:
+            self._ingest_progress = {"state": STATE_DONE, "embedded": 0, "total": 0}
             return
-
-        self._qdrant_client.create_collection(
-            collection_name=self._qdrant_collection,
-            vectors_config=models.VectorParams(size=vector_size, distance=models.Distance.COSINE),
-        )
-        log.info("Created Qdrant collection '%s' (size=%d)", self._qdrant_collection, vector_size)
-
-    def _do_embed_qdrant(self, gen: int):
         try:
-            total = len(self.chunks)
-            if total == 0:
-                self._ingest_progress = {"state": "done", "embedded": 0, "total": 0}
+            # Always build graph; used for hybrid re-scoring during retrieval
+            self._graph.build(chunks)
+
+            # Re-check generation: if a newer ingest arrived during graph build, abort
+            if gen != self._ingest_generation:
                 return
 
-            self._ingest_progress = {"state": "running", "embedded": 0, "total": total}
+            # Batch-embed all chunks in as few HF API calls as possible
+            vectors = self._embedder.embed_batch(chunks)
 
-            points = []
-            for idx, chunk in enumerate(self.chunks):
-                if gen != self._ingest_generation:
-                    return
+            if gen != self._ingest_generation:
+                return
 
-                vector = self._embed_text(chunk)
-                if self._qdrant_vector_size is None:
-                    self._qdrant_vector_size = len(vector)
-                    self._ensure_qdrant_collection(self._qdrant_vector_size)
+            vector_size = len(vectors[0])
+            self._qdrant.ensure_collection(vector_size)
+            self._qdrant.upsert_batch(gen, chunks, vectors)
+            # Prune stale points from previous ingests
+            self._qdrant.delete_old_generations(gen)
 
-                if len(vector) != self._qdrant_vector_size:
-                    raise RuntimeError(
-                        f"Embedding size mismatch: expected {self._qdrant_vector_size}, got {len(vector)}"
-                    )
+            self._ingest_progress = {"state": STATE_DONE, "embedded": total, "total": total}
+        except Exception as exc:
+            log.error("qdrant.embed_failed", error=str(exc))
+            self._ingest_progress = {
+                "state": STATE_ERROR, "embedded": 0, "total": total, "error": str(exc)
+            }
 
-                points.append(
-                    models.PointStruct(
-                        id=(gen * 1_000_000) + idx,
-                        vector=vector,
-                        payload={"text": chunk, "chunk_index": idx, "generation": gen},
-                    )
-                )
-                self._ingest_progress["embedded"] = idx + 1
-
-            self._qdrant_client.upsert(collection_name=self._qdrant_collection, points=points)
-            self._ingest_progress["state"] = "done"
-            log.info("Qdrant index updated: %d chunks to collection '%s'", total, self._qdrant_collection)
-        except Exception as e:
-            log.exception("Qdrant index build failed")
-            self._ingest_progress = {"state": "error", "embedded": 0, "total": 0, "error": str(e)}
-
-    def _clear_graph(self):
-        self._chunk_terms = {}
-        self._chunk_entities = {}
-        self._entity_to_chunks = defaultdict(set)
-        self._entity_graph = defaultdict(dict)
-
-    def _add_undirected_edge(self, left: str, right: str, weight: float):
-        self._entity_graph[left][right] = self._entity_graph[left].get(right, 0.0) + weight
-        self._entity_graph[right][left] = self._entity_graph[right].get(left, 0.0) + weight
-
-    def _extract_terms(self, text: str) -> list[str]:
-        tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower())
-        return [t for t in tokens if t not in STOPWORDS]
-
-    def _extract_entities(self, text: str) -> set[str]:
-        entities: set[str] = set()
-
-        for phrase in re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b", text):
-            norm = phrase.strip().lower()
-            if len(norm) > 2 and norm not in STOPWORDS:
-                entities.add(norm)
-
-        for acronym in re.findall(r"\b[A-Z]{2,}\b", text):
-            entities.add(acronym.lower())
-
-        terms = self._extract_terms(text)
-        counts = Counter(terms)
-        for token, count in counts.most_common(6):
-            if count >= 2 and token not in STOPWORDS:
-                entities.add(token)
-
-        return entities
-
-    def _expand_query_entities(self, query_entities: set[str], hop_limit: int = 1, per_node_limit: int = 6) -> set[str]:
-        expanded = set(query_entities)
-        frontier = set(query_entities)
-
-        for _ in range(hop_limit):
-            next_frontier: set[str] = set()
-            for ent in frontier:
-                neighbors = sorted(
-                    self._entity_graph.get(ent, {}).items(),
-                    key=lambda kv: kv[1],
-                    reverse=True,
-                )[:per_node_limit]
-                for nbr, _weight in neighbors:
-                    if nbr not in expanded:
-                        expanded.add(nbr)
-                        next_frontier.add(nbr)
-            frontier = next_frontier
-            if not frontier:
-                break
-
-        return expanded
-
-    def _candidate_chunks(self, query_entities: set[str], expanded_entities: set[str]) -> set[int]:
-        candidates: set[int] = set()
-        for ent in expanded_entities:
-            candidates.update(self._entity_to_chunks.get(ent, set()))
-
-        if candidates:
-            return candidates
-
-        # No graph-entity match. Fall back to all chunks for lexical retrieval.
-        return set(range(len(self.chunks)))
-
-    def _keyword_overlap(self, query_terms: list[str], chunk_terms: Counter[str]) -> float:
-        if not query_terms:
-            return 0.0
-        hit = sum(1 for t in set(query_terms) if t in chunk_terms)
-        return hit / max(len(set(query_terms)), 1)
-
-    def _entity_coverage(self, query_entities: set[str], chunk_entities: set[str]) -> float:
-        if not query_entities:
-            return 0.0
-        inter = len(query_entities.intersection(chunk_entities))
-        return inter / max(len(query_entities), 1)
-
-    def _neighbor_support(self, query_entities: set[str], chunk_entities: set[str]) -> float:
-        if not query_entities:
-            return 0.0
-
-        support = 0.0
-        for q in query_entities:
-            nbrs = self._entity_graph.get(q, {})
-            if not nbrs:
-                continue
-            top = sorted(nbrs.items(), key=lambda kv: kv[1], reverse=True)[:8]
-            total_weight = sum(w for _, w in top) or 1.0
-            chunk_weight = sum(w for e, w in top if e in chunk_entities)
-            support += chunk_weight / total_weight
-
-        return support / max(len(query_entities), 1)
+    # ── Retrieval ─────────────────────────────────────────────────────────────
 
     def retrieve(self, query: str) -> list[RetrievedChunk]:
         if not self.chunks:
             return []
+        if self._qdrant is not None and self._embedder is not None:
+            return self._retrieve_hybrid(query)
+        return self._retrieve_graph(query)
 
-        if self._qdrant_enabled and self._qdrant_client is not None:
-            return self._retrieve_qdrant(query)
+    def _retrieve_graph(self, query: str) -> list[RetrievedChunk]:
+        terms, entities = self._graph.extract_query_features(query)
+        candidates = self._graph.retrieve(
+            terms,
+            entities,
+            self.top_k,
+            self._cfg.retrieve_min_score,
+            self._cfg.retrieve_relative_ratio,
+        )
+        return [RetrievedChunk(index=c.index, score=c.score, text=c.text) for c in candidates]
 
-        query_terms = self._extract_terms(query)
-        query_entities = self._extract_entities(query)
-        expanded = self._expand_query_entities(query_entities)
-        candidates = self._candidate_chunks(query_entities, expanded)
-
-        scored: list[RetrievedChunk] = []
-        for idx in candidates:
-            chunk_terms = self._chunk_terms.get(idx, Counter())
-            chunk_entities = self._chunk_entities.get(idx, set())
-
-            entity_score = self._entity_coverage(query_entities, chunk_entities)
-            neighbor_score = self._neighbor_support(query_entities, chunk_entities)
-            lexical_score = self._keyword_overlap(query_terms, chunk_terms)
-
-            if query_entities:
-                score = (0.55 * entity_score) + (0.25 * neighbor_score) + (0.20 * lexical_score)
-            else:
-                score = (0.85 * lexical_score) + (0.15 * (1.0 if chunk_entities else 0.0))
-
-            if score > 0:
-                scored.append(RetrievedChunk(index=idx, score=float(score), text=self.chunks[idx]))
-
-        if not scored:
-            return []
-
-        scored.sort(key=lambda c: c.score, reverse=True)
-        candidate_count = max(self.top_k * 4, self.top_k)
-        candidates = scored[:candidate_count]
-
-        top_score = candidates[0].score
-        min_abs = float(os.environ.get("RETRIEVE_MIN_SCORE", "0.15"))
-        min_ratio = float(os.environ.get("RETRIEVE_RELATIVE_RATIO", "0.35"))
-        filtered = [c for c in candidates if c.score >= min_abs and c.score >= (top_score * min_ratio)]
-
-        if not filtered:
-            filtered = [candidates[0]]
-
-        return filtered[: self.top_k]
-
-    def _retrieve_qdrant(self, query: str) -> list[RetrievedChunk]:
+    def _retrieve_hybrid(self, query: str) -> list[RetrievedChunk]:
+        """
+        True hybrid: Qdrant cosine similarity narrows candidates;
+        graph scorer re-ranks them via entity path reasoning.
+        Falls back to graph-only if Qdrant embedding or search fails.
+        """
         try:
-            query_vector = self._embed_text(query)
-            hits = self._qdrant_client.search(
-                collection_name=self._qdrant_collection,
-                query_vector=query_vector,
-                limit=self.top_k,
-                query_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="generation",
-                            match=models.MatchValue(value=self._ingest_generation),
-                        )
-                    ]
-                ),
-                with_payload=True,
+            qvec = self._embedder.embed_single(query)
+        except Exception as exc:
+            log.warning("hybrid.embed_query_failed", error=str(exc), action="fallback_to_graph")
+            return self._retrieve_graph(query)
+
+        hits = self._qdrant.search(qvec, self._ingest_generation, limit=self.top_k * 4)
+        if not hits:
+            log.warning("hybrid.qdrant_empty", action="fallback_to_graph")
+            return self._retrieve_graph(query)
+
+        terms, entities = self._graph.extract_query_features(query)
+        candidate_indices = [h["chunk_index"] for h in hits]
+        vector_scores = {h["chunk_index"]: h["score"] for h in hits}
+
+        graph_candidates = self._graph.score_candidates(
+            candidate_indices, terms, entities, list(self.chunks)
+        )
+        graph_scores = {c.index: c.score for c in graph_candidates}
+
+        vw = self._cfg.hybrid_vector_weight
+        gw = self._cfg.hybrid_graph_weight
+        scored = [
+            RetrievedChunk(
+                index=idx,
+                score=(vw * vector_scores.get(idx, 0.0)) + (gw * graph_scores.get(idx, 0.0)),
+                text=self.chunks[idx],
             )
-            out: list[RetrievedChunk] = []
-            for hit in hits:
-                payload = hit.payload or {}
-                text = payload.get("text")
-                idx = payload.get("chunk_index")
-                if text is None or idx is None:
-                    continue
-                out.append(RetrievedChunk(index=int(idx), score=float(hit.score), text=str(text)))
-            return out
-        except Exception as e:
-            log.warning("Qdrant retrieval failed; returning no results: %s", e)
-            return []
+            for idx in candidate_indices
+            if idx < len(self.chunks)
+        ]
+        scored.sort(key=lambda c: c.score, reverse=True)
+        return scored[: self.top_k]
+
+    # ── Confidence ────────────────────────────────────────────────────────────
 
     def _confidence_from_retrieved(self, retrieved: list[RetrievedChunk]) -> tuple[float, str]:
         top_score = float(retrieved[0].score) if retrieved else 0.0
@@ -545,9 +369,18 @@ class RAGEngine:
             return top_score, "Medium"
         return top_score, "Low"
 
-    def answer(self, query: str, history: list[dict] | None = None, answer_mode: str = "balanced") -> dict:
+    # ── Answer ────────────────────────────────────────────────────────────────
+
+    def answer(
+        self,
+        query: str,
+        history: list[dict] | None = None,
+        answer_mode: str = "balanced",
+    ) -> dict:
         retrieved = self.retrieve(query)
-        chunks_payload = [{"index": c.index, "score": round(c.score, 4), "text": c.text} for c in retrieved]
+        chunks_payload = [
+            {"index": c.index, "score": round(c.score, 4), "text": c.text} for c in retrieved
+        ]
         top_score, confidence_label = self._confidence_from_retrieved(retrieved)
 
         if answer_mode == "strict_grounded" and confidence_label == "Low":
@@ -563,12 +396,7 @@ class RAGEngine:
                 "justification": "Low retrieval confidence; no valid path found.",
             }
 
-        context_block = "\n\n".join(
-            f"[chunk_id: {c.index}]\n{c.text}" for c in retrieved
-        )
-
-        hf_token = os.environ.get("HF_TOKEN")
-        if not hf_token:
+        if not self._cfg.hf_token:
             return {
                 "answer": "HF_TOKEN not set.",
                 "chunks": chunks_payload,
@@ -581,12 +409,22 @@ class RAGEngine:
                 "justification": "",
             }
 
+        context_block = "\n\n".join(
+            f"[chunk_id: {c.index}]\n{c.text}" for c in retrieved
+        )
         messages = self._build_messages(query, context_block, history)
-        return self._call_llm(hf_token, messages, chunks_payload, top_score, confidence_label)
+        return self._call_llm(messages, chunks_payload, top_score, confidence_label)
 
-    def stream_answer(self, query: str, history: list[dict] | None = None, answer_mode: str = "balanced"):
+    def stream_answer(
+        self,
+        query: str,
+        history: list[dict] | None = None,
+        answer_mode: str = "balanced",
+    ):
         retrieved = self.retrieve(query)
-        chunks_payload = [{"index": c.index, "score": round(c.score, 4), "text": c.text} for c in retrieved]
+        chunks_payload = [
+            {"index": c.index, "score": round(c.score, 4), "text": c.text} for c in retrieved
+        ]
         top_score, confidence_label = self._confidence_from_retrieved(retrieved)
         yield {"type": "meta", "top_score": round(top_score, 4), "confidence_label": confidence_label}
         yield {"type": "chunks", "data": chunks_payload}
@@ -600,121 +438,79 @@ class RAGEngine:
             }
             return
 
-        hf_token = os.environ.get("HF_TOKEN")
-        if not hf_token:
+        if not self._cfg.hf_token:
             yield {"type": "token", "data": "HF_TOKEN not set."}
-            yield {"type": "done", "model_used": None, "reasoning_type": "insufficient", "path": [], "used_chunks": [], "justification": ""}
+            yield {
+                "type": "done", "model_used": None, "reasoning_type": "insufficient",
+                "path": [], "used_chunks": [], "justification": "",
+            }
             return
 
         context_block = "\n\n".join(
             f"[chunk_id: {c.index}]\n{c.text}" for c in retrieved
         )
         messages = self._build_messages(query, context_block, history)
+        full_text, model_used = self._buffer_llm(messages)
+        graph_resp = self._parse_graph_response(full_text)
+        answer_text = graph_resp.get("answer", full_text)
 
-        # Buffer full LLM output so we can parse the JSON before emitting clean answer tokens.
-        full_text, model_used = self._buffer_llm(hf_token, messages)
-        graph = self._parse_graph_response(full_text)
-        answer_text = graph.get("answer", full_text)
-
-        # Emit answer text word-by-word so the frontend stream still assembles naturally.
-        for token_chunk in re.split(r'(\s+)', answer_text):
+        for token_chunk in re.split(r"(\s+)", answer_text):
             if token_chunk:
                 yield {"type": "token", "data": token_chunk}
 
         yield {
             "type": "done",
             "model_used": model_used,
-            "reasoning_type": graph.get("reasoning_type", "direct"),
-            "path": graph.get("path", []),
-            "used_chunks": graph.get("used_chunks", []),
-            "justification": graph.get("justification", ""),
+            "reasoning_type": graph_resp.get("reasoning_type", "direct"),
+            "path": graph_resp.get("path", []),
+            "used_chunks": graph_resp.get("used_chunks", []),
+            "justification": graph_resp.get("justification", ""),
         }
 
-    def _buffer_llm(self, token: str, messages: list[dict]) -> tuple[str, str | None]:
-        """Non-streaming call used by stream_answer to enable JSON parsing before token emission."""
-        client = InferenceClient(api_key=token)
-        candidates = list(dict.fromkeys([self.llm_model] + FALLBACK_MODELS))
+    # ── LLM helpers ───────────────────────────────────────────────────────────
+
+    def _buffer_llm(self, messages: list[dict]) -> tuple[str, str | None]:
+        client = InferenceClient(api_key=self._cfg.hf_token)
+        candidates = list(dict.fromkeys([self.llm_model] + FALLBACK_LLM_MODELS))
         for model in candidates:
             try:
-                resp = client.chat_completion(model=model, messages=messages, max_tokens=600, temperature=0.2)
+                resp = client.chat_completion(
+                    model=model, messages=messages, max_tokens=600, temperature=0.2
+                )
                 return resp.choices[0].message.content, model
-            except Exception as e:
-                log.warning("Buffered LLM %s failed: %s", model, e)
-                continue
+            except Exception as exc:
+                log.warning("llm.model_failed", model=model, error=str(exc))
         return "All candidate models failed.", None
-
-    def _parse_graph_response(self, text: str) -> dict:
-        """Extract and parse the mandatory JSON object from the LLM response."""
-        import json
-        # Strip optional markdown fences
-        cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip(), flags=re.MULTILINE)
-        # Grab outermost JSON object
-        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        # Fallback: treat raw text as answer, mark as direct
-        return {
-            "answer": text.strip(),
-            "reasoning_type": "direct",
-            "path": [],
-            "used_chunks": [],
-            "justification": "JSON parse failed; raw answer returned.",
-        }
-
-    def _build_messages(self, query: str, context: str, history: list[dict] | None) -> list[dict]:
-        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        if history:
-            messages.extend({"role": m["role"], "content": m["content"]} for m in history)
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Question:\n{query}\n\n"
-                    "Retrieved Context (use the chunk_id values in your used_chunks field):\n"
-                    f"{context}\n\n"
-                    "Instructions:\n"
-                    "- Step 1: Extract entities from the question.\n"
-                    "- Step 2: Traverse relationships across chunks to build a path.\n"
-                    "- Step 3: Return ONLY a valid JSON object matching the mandatory format.\n"
-                    "- Do NOT include any text outside the JSON object."
-                ),
-            }
-        )
-        return messages
 
     def _call_llm(
         self,
-        token: str,
         messages: list[dict],
         chunks_payload: list[dict],
         top_score: float,
         confidence_label: str,
     ) -> dict:
-        client = InferenceClient(api_key=token)
-        candidates = list(dict.fromkeys([self.llm_model] + FALLBACK_MODELS))
-
+        client = InferenceClient(api_key=self._cfg.hf_token)
+        candidates = list(dict.fromkeys([self.llm_model] + FALLBACK_LLM_MODELS))
         for model in candidates:
             try:
-                resp = client.chat_completion(model=model, messages=messages, max_tokens=600, temperature=0.2)
+                resp = client.chat_completion(
+                    model=model, messages=messages, max_tokens=600, temperature=0.2
+                )
                 raw = resp.choices[0].message.content
-                graph = self._parse_graph_response(raw)
+                graph_resp = self._parse_graph_response(raw)
                 return {
-                    "answer": graph.get("answer", raw),
+                    "answer": graph_resp.get("answer", raw),
                     "chunks": chunks_payload,
                     "model_used": model,
                     "top_score": round(top_score, 4),
                     "confidence_label": confidence_label,
-                    "reasoning_type": graph.get("reasoning_type", "direct"),
-                    "path": graph.get("path", []),
-                    "used_chunks": graph.get("used_chunks", []),
-                    "justification": graph.get("justification", ""),
+                    "reasoning_type": graph_resp.get("reasoning_type", "direct"),
+                    "path": graph_resp.get("path", []),
+                    "used_chunks": graph_resp.get("used_chunks", []),
+                    "justification": graph_resp.get("justification", ""),
                 }
-            except Exception as e:
-                log.warning("LLM %s failed: %s", model, e)
-                continue
+            except Exception as exc:
+                log.warning("llm.model_failed", model=model, error=str(exc))
 
         return {
             "answer": "All candidate models failed.",
@@ -727,3 +523,42 @@ class RAGEngine:
             "used_chunks": [],
             "justification": "All LLM candidates failed.",
         }
+
+    def _parse_graph_response(self, text: str) -> dict:
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+        return {
+            "answer": text.strip(),
+            "reasoning_type": "direct",
+            "path": [],
+            "used_chunks": [],
+            "justification": "JSON parse failed; raw answer returned.",
+        }
+
+    def _build_messages(
+        self, query: str, context: str, history: list[dict] | None
+    ) -> list[dict]:
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if history:
+            messages.extend(
+                {"role": m["role"], "content": m["content"]} for m in history
+            )
+        messages.append({
+            "role": "user",
+            "content": (
+                f"Question:\n{query}\n\n"
+                "Retrieved Context (use the chunk_id values in your used_chunks field):\n"
+                f"{context}\n\n"
+                "Instructions:\n"
+                "- Step 1: Extract entities from the question.\n"
+                "- Step 2: Traverse relationships across chunks to build a path.\n"
+                "- Step 3: Return ONLY a valid JSON object matching the mandatory format.\n"
+                "- Do NOT include any text outside the JSON object."
+            ),
+        })
+        return messages

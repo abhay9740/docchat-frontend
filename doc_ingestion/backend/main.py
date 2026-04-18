@@ -13,8 +13,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .ingestion import read_upload
+from .logging_config import configure_logging
 from .parser import parse_file
 from .rag import RAGEngine
+
+configure_logging()
 
 app = FastAPI(title="Document Ingestion API", version="1.0.0")
 
@@ -141,6 +144,15 @@ async def config():
         "embed_provider": rag_engine.embed_provider,
         "retrieval_backend": rag_engine.retrieval_backend,
     }
+
+
+@app.get("/healthz")
+async def healthz():
+    """Liveness + readiness probe. Returns 503 when Qdrant is configured but unreachable."""
+    from fastapi.responses import JSONResponse
+    result = rag_engine.health()
+    status_code = 503 if result.get("status") == "degraded" else 200
+    return JSONResponse(content=result, status_code=status_code)
 
 
 @app.get("/vector_store_status")
