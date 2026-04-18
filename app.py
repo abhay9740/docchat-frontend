@@ -787,18 +787,18 @@ def _render_selected_chunk_preview():
 # â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _render_knowledge_graph_section():
-    with st.expander("ðŸ•¸ Knowledge Graph", expanded=False):
+    with st.expander("Knowledge Graph", expanded=False):
         c1, c2 = st.columns([3, 2])
         max_nodes = c1.slider(
             "Max nodes", 20, 300, 120, 10,
             key="graph_max_nodes",
             help="Larger values show more entities but may slow rendering.",
         )
-        if c2.button("ðŸ”„ Refresh", key="load_graph_btn", use_container_width=True):
+        if c2.button("Refresh", key="load_graph_btn", use_container_width=True):
             for k in _GRAPH_SESSION_KEYS:
                 st.session_state.pop(k, None)
-            _fetch_graph_into_session(max_nodes)
             st.rerun()
+            _fetch_graph_into_session(max_nodes)
 
         if (
             not st.session_state.get("cached_graph_html")

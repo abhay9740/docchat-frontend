@@ -14,12 +14,13 @@ engine.ingest(doc)
 
 # ── 1. Graph index ────────────────────────────────────────────────────────────
 print("=== GRAPH INDEX ===")
-nodes = len(engine._entity_to_chunks)
-edges = sum(len(v) for v in engine._entity_graph.values()) // 2
+graph_status = engine._graph.status()
+nodes = graph_status["graph_nodes"]
+edges = graph_status["graph_edges"]
 print(f"  nodes  : {nodes}")
 print(f"  edges  : {edges}")
-print(f"  chunks : {len(engine.chunks)}")
-top = sorted(engine._entity_to_chunks.items(), key=lambda x: len(x[1]), reverse=True)[:5]
+print(f"  chunks : {graph_status['indexed_chunks']}")
+top = sorted(engine._graph._entity_to_chunks.items(), key=lambda x: len(x[1]), reverse=True)[:5]
 print("  top entities:", [(e, sorted(c)) for e, c in top])
 assert nodes > 0, "Graph must have nodes"
 assert edges > 0, "Graph must have edges"
