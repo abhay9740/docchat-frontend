@@ -212,7 +212,12 @@ class RAGEngine:
         }
 
     def graph_data(self, max_nodes: int = 200, max_edges: int = 500) -> dict:
-        return self._graph.export_graph_data(max_nodes=max_nodes, max_edges=max_edges)
+        log.info("rag.graph_data.called", max_nodes=max_nodes, max_edges=max_edges)
+        try:
+            self._graph.export_graph_data(max_nodes=max_nodes, max_edges=max_edges)
+        except Exception as exc:
+            log.error("rag.graph_data_failed", error=str(exc))
+            raise
 
     def health(self) -> dict:
         qdrant_ok: bool | None = self._qdrant.ping() if self._qdrant else None

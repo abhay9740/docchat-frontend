@@ -17,6 +17,9 @@ from .logging_config import configure_logging
 from .parser import parse_file
 from .rag import RAGEngine
 
+import structlog
+log = structlog.get_logger(__name__)
+
 configure_logging()
 
 app = FastAPI(title="Document Ingestion API", version="1.0.0")
@@ -158,10 +161,17 @@ async def healthz():
 @app.get("/graph_data")
 async def graph_data(max_nodes: int = 200, max_edges: int = 500):
     """Return knowledge graph nodes and edges for visualisation."""
-    if not rag_engine.chunks:
-        raise HTTPException(status_code=400, detail="No document ingested.")
-    return rag_engine.graph_data(max_nodes=max_nodes, max_edges=max_edges)
-
+    log.info("graph_data.request", max_nodes=max_nodes, max_edges=max_edges)
+    try:
+        if not rag_engine.chunks:
+            log.warning("graph_data.no_document")
+            raise HTTPException(status_code=400, detail="No document ingested.")
+        result = rag_engine.graph_data(max_nodes=max_nodes, max_edges=max_edges)
+        log.info("graph_data.success", nodes=len(result.get("nodes", [])), edges=len(result.get("edges", [])))
+        return result
+    except Exception as exc:
+        log.error("graph_data.failed", error=str(exc))
+        raise
 
 @app.get("/vector_store_status")
 async def vector_store_status():
