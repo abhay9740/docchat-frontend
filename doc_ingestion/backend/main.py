@@ -147,7 +147,7 @@ async def vector_store_status():
 
 @app.get("/graph_store_status")
 async def graph_store_status():
-    return rag_engine.vector_store_status()
+    return rag_engine.graph_store_status()
 
 
 @app.post("/query")

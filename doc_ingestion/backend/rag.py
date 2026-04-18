@@ -130,6 +130,10 @@ class RAGEngine:
             "detail": "GraphRAG index active. Retrieval is entity and relation based, not vector similarity.",
         }
 
+    def graph_store_status(self) -> dict:
+        # Graph retrieval is the active backend; keep vector endpoint as a compatibility alias.
+        return self.vector_store_status()
+
     def ingest(self, text: str) -> int:
         self._do_split(text)
         self._do_embed()
