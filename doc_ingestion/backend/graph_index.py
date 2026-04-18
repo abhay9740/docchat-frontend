@@ -152,6 +152,61 @@ class GraphIndex:
             "indexed_chunks": chunk_count,
         }
 
+    def export_graph_data(self, max_nodes: int = 200, max_edges: int = 500) -> dict:
+        """
+        Return a JSON-serialisable dict of nodes and edges for visualisation.
+        Nodes are sorted by degree (most-connected first) and capped at max_nodes.
+        Edges are capped at max_edges; only edges between included nodes are exported.
+        """
+        with self._lock:
+            e2c = {k: set(v) for k, v in self._entity_to_chunks.items()}
+            e_graph = {k: dict(v) for k, v in self._entity_graph.items()}
+
+        total_nodes = len(e2c)
+        total_edges = sum(len(v) for v in e_graph.values()) // 2
+
+        nodes_by_degree = sorted(
+            e2c.keys(), key=lambda e: len(e_graph.get(e, {})), reverse=True
+        )
+        top_node_ids = set(nodes_by_degree[:max_nodes])
+
+        nodes = [
+            {
+                "id": ent,
+                "label": ent,
+                "chunks": sorted(e2c.get(ent, set())),
+                "degree": len(e_graph.get(ent, {})),
+            }
+            for ent in nodes_by_degree[:max_nodes]
+        ]
+
+        edges: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for src in nodes_by_degree[:max_nodes]:
+            for tgt, weight in sorted(
+                e_graph.get(src, {}).items(), key=lambda kv: kv[1], reverse=True
+            ):
+                if tgt not in top_node_ids:
+                    continue
+                key = (min(src, tgt), max(src, tgt))
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append({"source": src, "target": tgt, "weight": round(weight, 4)})
+                if len(edges) >= max_edges:
+                    break
+            if len(edges) >= max_edges:
+                break
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "total_nodes": total_nodes,
+            "total_edges": total_edges,
+            "shown_nodes": len(nodes),
+            "shown_edges": len(edges),
+        }
+
 
 # ── Module-level pure functions (also used by rag.py) ─────────────────────────
 

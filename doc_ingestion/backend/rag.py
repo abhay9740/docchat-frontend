@@ -211,6 +211,9 @@ class RAGEngine:
             "detail": "Graph index status.",
         }
 
+    def graph_data(self, max_nodes: int = 200, max_edges: int = 500) -> dict:
+        return self._graph.export_graph_data(max_nodes=max_nodes, max_edges=max_edges)
+
     def health(self) -> dict:
         qdrant_ok: bool | None = self._qdrant.ping() if self._qdrant else None
         return {

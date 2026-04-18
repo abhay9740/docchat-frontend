@@ -155,6 +155,14 @@ async def healthz():
     return JSONResponse(content=result, status_code=status_code)
 
 
+@app.get("/graph_data")
+async def graph_data(max_nodes: int = 200, max_edges: int = 500):
+    """Return knowledge graph nodes and edges for visualisation."""
+    if not rag_engine.chunks:
+        raise HTTPException(status_code=400, detail="No document ingested.")
+    return rag_engine.graph_data(max_nodes=max_nodes, max_edges=max_edges)
+
+
 @app.get("/vector_store_status")
 async def vector_store_status():
     return rag_engine.vector_store_status()
