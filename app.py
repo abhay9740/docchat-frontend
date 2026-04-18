@@ -363,6 +363,8 @@ for key, default in _DEFAULTS.items():
 
 _WIDGET_KEYS = {"sl_chunk_size", "sl_chunk_overlap"}
 
+_GRAPH_SESSION_KEYS = ("cached_graph_html", "cached_graph_caption", "graph_fetch_attempted")
+
 
 def _clear_session():
     for key, default in _DEFAULTS.items():
@@ -373,6 +375,8 @@ def _clear_session():
                 "recommended_top_k", "last_chunk_size", "last_chunk_overlap"):
         st.session_state.pop(key, None)
     st.session_state.selected_chunk = None
+    for k in _GRAPH_SESSION_KEYS:
+        st.session_state.pop(k, None)
 
 
 def _upload_file(file_obj, chunk_size: int, chunk_overlap: int) -> dict | None:
@@ -407,6 +411,8 @@ def _apply_upload_result(data: dict, file_name: str, chunk_size: int, chunk_over
     st.session_state.recommended_chunk_size = data.get("recommended_chunk_size")
     st.session_state.recommended_chunk_overlap = data.get("recommended_chunk_overlap")
     st.session_state.recommended_top_k = data.get("recommended_top_k")
+    for k in _GRAPH_SESSION_KEYS:
+        st.session_state.pop(k, None)
 
 
 def _poll_ingest_progress(max_wait=1800):
@@ -495,6 +501,123 @@ def _time_greeting() -> str:
     if hour < 17:
         return "Good afternoon"
     return "Good evening"
+
+
+# ── Knowledge Graph visualiser ────────────────────────────────────────────────
+
+_GRAPH_PALETTE = [
+    "#4f94f7", "#ea4335", "#34a853", "#fbbc04", "#9c27b0",
+    "#00acc1", "#ff7043", "#43a047", "#e91e63", "#795548",
+]
+
+
+def _fetch_graph_into_session(max_nodes: int) -> None:
+    """Fetch graph data from backend, build pyvis HTML, store in session_state."""
+    try:
+        from pyvis.network import Network
+    except ImportError:
+        st.error("`pyvis` is not installed — add it to `requirements.txt` and redeploy.")
+        return
+
+    with st.spinner("Building graph…"):
+        try:
+            resp = requests.get(
+                f"{API_BASE}/graph_data",
+                params={"max_nodes": max_nodes, "max_edges": 500},
+                timeout=30,
+            )
+        except requests.ConnectionError:
+            st.error("Cannot connect to backend.")
+            return
+
+        if resp.status_code == 400:
+            st.info(resp.json().get("detail", "No graph data yet."))
+            return
+        if resp.status_code != 200:
+            st.error(f"Failed to fetch graph data (HTTP {resp.status_code}).")
+            return
+
+        data = resp.json()
+
+    nodes = data.get("nodes", [])
+    edges = data.get("edges", [])
+
+    if not nodes:
+        st.info("Graph is empty — the document may still be indexing.")
+        return
+
+    net = Network(
+        height="580px", width="100%",
+        bgcolor="#161b22", font_color="#e6edf3",
+        directed=False,
+    )
+    net.barnes_hut(spring_length=120, spring_strength=0.04, damping=0.09)
+    net.set_options("""
+    {
+      "nodes": {"borderWidth": 1, "shadow": true},
+      "edges": {"smooth": {"type": "continuous"}, "shadow": false},
+      "interaction": {"hover": true, "tooltipDelay": 150,
+                      "navigationButtons": true, "keyboard": true},
+      "physics": {"stabilization": {"iterations": 120}}
+    }
+    """)
+
+    max_degree = max((n["degree"] for n in nodes), default=1)
+    for node in nodes:
+        deg = node["degree"]
+        size = 10 + 28 * (deg / max(max_degree, 1))
+        chunk_idx = node["chunks"][0] if node["chunks"] else 0
+        color = _GRAPH_PALETTE[chunk_idx % len(_GRAPH_PALETTE)]
+        chunks_str = ", ".join(str(c) for c in node["chunks"])
+        net.add_node(
+            node["id"],
+            label=node["label"],
+            title=f"Entity: {node['id']}<br>Chunks: {chunks_str}<br>Degree: {deg}",
+            size=size,
+            color=color,
+        )
+
+    for edge in edges:
+        net.add_edge(
+            edge["source"], edge["target"],
+            value=edge["weight"],
+            title=f"Co-occurrence weight: {edge['weight']:.3f}",
+        )
+
+    st.session_state["cached_graph_html"] = net.generate_html()
+    st.session_state["cached_graph_caption"] = (
+        f"Showing **{data['shown_nodes']}** of {data['total_nodes']} entities · "
+        f"**{data['shown_edges']}** of {data['total_edges']} co-occurrence edges. "
+        f"Node size = connectivity · colour = source chunk · drag to explore."
+    )
+
+
+def _render_knowledge_graph_section() -> None:
+    with st.expander("🕸 Knowledge Graph", expanded=True):
+        c1, c2 = st.columns([3, 2])
+        max_nodes = c1.slider(
+            "Max nodes", min_value=20, max_value=300, value=120, step=10,
+            key="graph_max_nodes",
+            help="Larger values show more entities but may slow rendering.",
+        )
+        if c2.button("🔄 Load / Refresh", key="load_graph_btn", use_container_width=True):
+            for k in _GRAPH_SESSION_KEYS:
+                st.session_state.pop(k, None)
+            _fetch_graph_into_session(max_nodes)
+            st.rerun()
+
+        cached_html = st.session_state.get("cached_graph_html")
+        if not cached_html and not st.session_state.get("graph_fetch_attempted"):
+            st.session_state["graph_fetch_attempted"] = True
+            _fetch_graph_into_session(max_nodes)
+            st.rerun()
+
+        cached_html = st.session_state.get("cached_graph_html")
+        if cached_html:
+            st.markdown(st.session_state.get("cached_graph_caption", ""))
+            st.components.v1.html(cached_html, height=600, scrolling=False)
+        else:
+            st.info("No graph data yet — click **Load / Refresh** to try again.")
 
 
 def _confidence_css_class(confidence_label: str | None) -> str:
@@ -939,6 +1062,9 @@ def _render_chat(top_k: int, answer_mode: str):
                 "model_used": stream_state.get("model"),
             }
         )
+
+    # Knowledge graph — shown after the chat history
+    _render_knowledge_graph_section()
 
     # Keep citation preview anchored in one place to avoid layout jumps.
     # Render at the bottom so it does not displace conversation headers.
